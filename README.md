@@ -44,7 +44,7 @@ curl -s "localhost:8081/bookings/can-book?tenantId=acme&officeId=blr-ecospace&de
 # after the change:  {"allowed":true,"cutoff":"PT30M","configVersion":9}
 ```
 
-Use `officeId=hyd-hitec` to see an office without an override fall back to the 60 min default. In the first second or two after start, before the demo has pulled its first snapshot, `can-book` answers 503 `configuration not loaded yet`. Metrics are on
+Use `officeId=hyd-hitec` to see an office without an override fall back to the 60 min default. In the first second or two after start, before the demo has pulled its first snapshot, `can-book` answers 503 with the problem detail `configuration not loaded yet`, and the demo's `/actuator/health` stays DOWN until then. Metrics are on
 `localhost:8080/actuator/prometheus` (server: `config_server_version`, `config_push_connections`,
 `config_changes_total`, ...) and `localhost:8081/actuator/prometheus` (client: `config_client_version`,
 `config_client_lag_versions`, `config_client_reconnects_total`, `config_client_read_latency_seconds`, ...).
@@ -184,7 +184,16 @@ All paths under `/api/v1`. Errors are RFC 7807 problem details with `errorCode`,
 | `GET /config/version` | SERVICE, ADMIN | -> `{version}` |
 | `GET /config/stream` | SERVICE, ADMIN | SSE; `Last-Event-ID` header (or `?since`) replays what was missed |
 | `GET /config/snapshot?since=V` | authenticated | `{"type":"delta",...}` or `{"type":"full",...}`, other tenants filtered out unless SERVICE/ADMIN |
-| `GET /actuator/health`, `/actuator/prometheus` | public | |
+| `GET /actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/prometheus` | public | liveness ignores the database, so a server that still serves reads from memory is not restarted when only Postgres is down |
+
+To watch the push stream the way an embedded client does (it replays everything after `Last-Event-ID`, then stays
+open with a `: ping` every 15 s):
+
+```bash
+SVC=$(curl -s -X POST localhost:8080/api/v1/auth/token -H 'Content-Type: application/json' \
+  -d '{"username":"booking-svc","password":"svc"}' | sed -E 's/.*"token":"([^"]+)".*/\1/')
+curl -N localhost:8080/api/v1/config/stream -H "Authorization: Bearer $SVC" -H 'Last-Event-ID: 0'
+```
 
 `op` is `SET` or `UNSET`; `level` is `CLIENT`, `OFFICE` or `SHIFT` (GLOBAL changes go through the definition
 default). Postman collection: [docs/postman/tenant-config.postman_collection.json](docs/postman/tenant-config.postman_collection.json).
@@ -198,9 +207,10 @@ default). Postman collection: [docs/postman/tenant-config.postman_collection.jso
 | EMPLOYEE | resolve values for its own tenant | `acme-emp` / `emp` | acme |
 | SERVICE | read the stream, version and full snapshot for all tenants | `booking-svc` / `svc` | all |
 
-Tokens are HS256 JWTs carrying `sub`, `role`, `tenantId`, `exp`. A caller who names another tenant in the path gets
-**404**, not 403, with the same body as a tenant that does not exist, so the answer does not reveal that the other
-tenant exists. A role that may not perform the action at all (an EMPLOYEE posting a change) gets 403.
+Tokens are HS256 JWTs carrying `sub`, `role`, `tenantId`, `exp`. Tenants are not registered anywhere: a tenant is
+the id in the path and in the operator's token. An OPERATOR or EMPLOYEE who names any tenant other than their own
+gets **404**, not 403, with one fixed body whether or not anyone uses that id, so the answer reveals nothing about
+other tenants. ADMIN may write to any tenant id. `*` is reserved for definitions and is 404 for everyone. A role that may not perform the action at all (an EMPLOYEE posting a change) gets 403.
 
 ## Failure modes
 
@@ -264,10 +274,18 @@ tenant exists. A role that may not perform the action at all (an EMPLOYEE postin
   and their deltas skip other tenants' versions, so gaps are expected there.
 - Versions are gap-free: a failed commit's sequence number is reused, because clients apply exactly `local + 1`.
 - Rollback covers one tenant's overrides, not definitions or GLOBAL defaults. A rollback that would restore a value
-  today's rules reject fails with 422. Promote accepts only a CHANGE made of OFFICE-level SETs.
+  today's rules reject fails with 422. A rollback request without `"dryRun": false` is only a preview.
+- Promote accepts a CHANGE made only of OFFICE-level SETs that agree on each key's value (a staged rollout, or a
+  one-office pilot). It is refused with 409 `STAGED_CHANGE_SUPERSEDED` once any of those offices no longer holds the
+  staged value, which also makes promoting the same version twice a 409.
 - An UNSET of a value that is not set still writes a version with no effect on state.
 - No token revocation; human tokens are short-lived instead.
-- `config_client_lag_seconds` compares the server's commit time with the client's clock, so clock skew shows up in it.
+- `config_client_lag_seconds` counts from the last moment the client knew it was current: a stream heartbeat (every
+  15 s), an applied event, or a heal poll with no lag. An applied event uses the server's commit time, so clock skew
+  can show up there.
+- A restored database is noticed when its version is below a client's: the heal poll then takes the server's full
+  snapshot. A restore followed by enough new writes to pass a client's version would not be noticed; that needs an
+  epoch id in every response, which I left out.
 
 ## Rule -> test
 
@@ -289,6 +307,9 @@ tenant exists. A role that may not perform the action at all (an EMPLOYEE postin
 | Server down: keep serving, start from disk | `ServerKillIT`, `DiskSnapshotColdStartTest` |
 | Roles and tenant isolation | `SecurityIT` |
 | Duplicate POST | `IdempotencyTest` |
+| Promote cannot overwrite newer values or run twice | `StagedRolloutTest` |
+| Missing fields and bad parameters are named, never echoed | `RequestValidationTest`, `ProblemDetailTest` |
+| Lag metric stays near 0 while connected | `HeartbeatTest`, `MicrometerClientMetricsTest` |
 | Errors leak nothing | `ProblemDetailTest` |
 
 ## How to run the tests and benchmarks
@@ -324,7 +345,12 @@ printf 'api.version=1.44\n' > ~/.docker-java.properties
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 ```
 
-Postman: import `docs/postman/tenant-config.postman_collection.json`; variables `base`, `tenant`, `token`.
+Postman: import `docs/postman/tenant-config.postman_collection.json` and run it in order against a fresh database
+(`docker compose down -v && docker compose up -d`). Folder 0 logs in as ADMIN, OPERATOR and SERVICE and stores
+`adminToken`, `opsToken` and `svcToken`; each folder uses the token its role needs, and every request checks its
+status code. `pilotVersion`, `stagedVersion` and `rollbackTarget` are read from the responses. The same run from the
+command line: `npx newman run docs/postman/tenant-config.postman_collection.json`. The SSE stream is left out of the
+collection because a runner would wait on it forever; use the `curl -N` command under the API table.
 
 ## Monitoring: what to look at at 3 AM
 
