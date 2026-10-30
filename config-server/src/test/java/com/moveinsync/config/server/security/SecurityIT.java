@@ -156,7 +156,8 @@ class SecurityIT {
 
         assertThat(metrics).contains("config_server_version", "config_push_connections", "config_recent_changes_size",
                 "config_changes_total{kind=\"DEFINITION\",result=\"accepted\"}", "config_push_send_failures_total",
-                "config_resolve_latency_seconds");
+                "config_resolve_latency_seconds", "config_push_queue_depth",
+                "config_changes_total{kind=\"ROLLBACK\",result=\"rejected\"}");
     }
 
     private ResultActions postChange(String bearer, String tenant) throws Exception {

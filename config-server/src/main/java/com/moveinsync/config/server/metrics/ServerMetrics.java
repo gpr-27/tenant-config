@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.function.Supplier;
 
 // dotted names; the Prometheus registry exports them as config_server_version, config_changes_total, ...
@@ -36,6 +37,11 @@ public class ServerMetrics {
         this.resolveLatency = Timer.builder("config.resolve.latency")
                 .description("time to resolve one key through the REST API")
                 .register(registry);
+        // registered up front so every series is in /actuator/prometheus before the first change arrives
+        for (ChangeKind kind : ChangeKind.values()) {
+            changes(kind, "accepted");
+            changes(kind, "rejected");
+        }
     }
 
     // PushHub owns the connection map, so it hands it over instead of this class depending on PushHub
@@ -45,12 +51,19 @@ public class ServerMetrics {
                 .register(registry);
     }
 
+    // the stripes' queues hold frames accepted for sending but not yet written to a socket
+    public void trackPushQueue(ThreadPoolExecutor[] stripes) {
+        Gauge.builder("config.push.queue.depth", stripes, ServerMetrics::queued)
+                .description("SSE frames waiting to be written")
+                .register(registry);
+    }
+
     public void changeAccepted(ChangeKind kind) {
-        registry.counter("config.changes", "kind", kind.name(), "result", "accepted").increment();
+        changes(kind, "accepted").increment();
     }
 
     public void changeRejected(ChangeKind kind, List<ValidationError> errors) {
-        registry.counter("config.changes", "kind", kind.name(), "result", "rejected").increment();
+        changes(kind, "rejected").increment();
         for (ValidationError error : errors) {
             registry.counter("config.validation.errors", "code", error.code()).increment();
         }
@@ -62,5 +75,17 @@ public class ServerMetrics {
 
     public <T> T timeResolve(Supplier<T> resolve) {
         return resolveLatency.record(resolve);
+    }
+
+    private Counter changes(ChangeKind kind, String result) {
+        return registry.counter("config.changes", "kind", kind.name(), "result", result);
+    }
+
+    private static int queued(ThreadPoolExecutor[] stripes) {
+        int total = 0;
+        for (ThreadPoolExecutor stripe : stripes) {
+            total += stripe.getQueue().size();
+        }
+        return total;
     }
 }

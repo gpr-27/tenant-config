@@ -20,19 +20,21 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Component
 public class PushHub {
 
     // SseEmitter.send is a blocking write: one single-thread executor per stripe means a slow client only delays
-    // the connections that share its stripe, and every connection still gets its events in version order
+    // the connections that share its stripe, and every connection still gets its events in version order.
+    // Built as ThreadPoolExecutor rather than Executors.newSingleThreadExecutor so the queue depth can be read.
     private static final int STRIPES = 8;
 
     private final Map<UUID, SseEmitter> emitters = new ConcurrentHashMap<>();
-    private final ExecutorService[] stripes = new ExecutorService[STRIPES];
+    private final ThreadPoolExecutor[] stripes = new ThreadPoolExecutor[STRIPES];
     // held by subscribe and by the enqueue phase of publish, so no event slips between "replay since V" and "live"
     private final Object registration = new Object();
     private final RecentChanges recentChanges;
@@ -47,15 +49,14 @@ public class PushHub {
         this.metrics = metrics;
         this.maxConnections = maxConnections;
         for (int i = 0; i < STRIPES; i++) {
-            stripes[i] = Executors.newSingleThreadExecutor(Thread.ofPlatform().name("push-" + i).daemon().factory());
+            stripes[i] = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(),
+                    Thread.ofPlatform().name("push-" + i).daemon().factory());
         }
         metrics.trackConnections(emitters);
+        metrics.trackPushQueue(stripes);
     }
 
     public SseEmitter subscribe(long lastVersion) {
-        if (emitters.size() >= maxConnections) {
-            throw new TooManyConnectionsException();
-        }
         UUID id = UUID.randomUUID();
         // no server-side timeout: a dead connection is found by the next failed write (heartbeat at the latest)
         SseEmitter emitter = new SseEmitter(0L);
@@ -65,6 +66,10 @@ public class PushHub {
 
         boolean resync;
         synchronized (registration) {
+            // checked under the same lock as the put, so concurrent subscribes cannot all pass a size of max - 1
+            if (emitters.size() >= maxConnections) {
+                throw new TooManyConnectionsException();
+            }
             emitters.put(id, emitter);
             Optional<List<ChangeEvent>> missed = recentChanges.since(lastVersion);
             // a client ahead of us saw a version this server no longer has (restored database): it must resync too
@@ -112,7 +117,7 @@ public class PushHub {
         for (SseEmitter emitter : emitters.values()) {
             emitter.complete();
         }
-        for (ExecutorService stripe : stripes) {
+        for (ThreadPoolExecutor stripe : stripes) {
             stripe.shutdown();
         }
     }
