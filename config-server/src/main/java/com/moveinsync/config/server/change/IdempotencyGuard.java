@@ -1,6 +1,7 @@
 package com.moveinsync.config.server.change;
 
 import com.moveinsync.config.core.change.ChangeEventCodec;
+import com.moveinsync.config.core.change.ChangeKind;
 import com.moveinsync.config.core.change.ChangeSet;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -16,9 +17,10 @@ import java.util.Optional;
 public class IdempotencyGuard {
 
     private final ChangeRepository changes;
+    private final Rejections rejections;
 
     // same tenant + key + body -> the version stored the first time; same key with another body -> 409
-    public Optional<Long> previousVersion(String tenantId, String idempotencyKey, String requestHash) {
+    public Optional<Long> previousVersion(String tenantId, ChangeKind kind, String idempotencyKey, String requestHash) {
         if (idempotencyKey == null) {
             return Optional.empty();
         }
@@ -27,6 +29,7 @@ public class IdempotencyGuard {
             return Optional.empty();
         }
         if (!earlier.get().getRequestHash().equals(requestHash)) {
+            rejections.idempotencyConflict(kind, tenantId);
             throw new IdempotencyConflictException();
         }
         return Optional.of(earlier.get().getVersion());

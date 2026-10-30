@@ -13,6 +13,7 @@ import com.moveinsync.config.core.scope.ScopeLevel;
 import com.moveinsync.config.server.change.ChangeEntity;
 import com.moveinsync.config.server.change.ChangeRepository;
 import com.moveinsync.config.server.change.ChangeSetService;
+import com.moveinsync.config.server.change.Rejections;
 import com.moveinsync.config.server.rollback.VersionNotFoundException;
 import com.moveinsync.config.server.web.dto.StageRequest;
 import com.moveinsync.config.server.web.dto.StageResponse;
@@ -31,6 +32,7 @@ public class RolloutService {
 
     private final ChangeSetService changeSets;
     private final ChangeRepository changes;
+    private final Rejections rejections;
 
     public StageResponse stage(String tenantId, StageRequest request, String author) {
         List<Operation> operations = new ArrayList<>();
@@ -51,8 +53,10 @@ public class RolloutService {
                 .orElseThrow(() -> new VersionNotFoundException(stagedVersion));
         List<Operation> stagedOperations = ChangeEventCodec.operationsFromJson(staged.operationsJson());
         if (!staged.getKind().equals(ChangeKind.CHANGE.name()) || !allOfficeSets(stagedOperations)) {
-            throw new ValidationException(List.of(new ValidationError(0, null, "NOT_A_STAGED_CHANGE",
-                    "only a CHANGE made of OFFICE-level SET operations can be promoted")));
+            List<ValidationError> errors = List.of(new ValidationError(0, null, "NOT_A_STAGED_CHANGE",
+                    "only a CHANGE made of OFFICE-level SET operations can be promoted"));
+            rejections.invalid(ChangeKind.PROMOTE, tenantId, errors);
+            throw new ValidationException(errors);
         }
 
         Map<String, JsonNode> clientValues = new LinkedHashMap<>();

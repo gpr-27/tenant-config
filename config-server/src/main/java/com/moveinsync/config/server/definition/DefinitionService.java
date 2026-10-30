@@ -2,12 +2,15 @@ package com.moveinsync.config.server.definition;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.moveinsync.config.core.change.ChangeKind;
 import com.moveinsync.config.core.definition.SettingDefinition;
+import com.moveinsync.config.core.error.InvalidValueException;
 import com.moveinsync.config.core.error.UnknownSettingException;
 import com.moveinsync.config.core.error.ValidationError;
 import com.moveinsync.config.core.error.ValidationException;
 import com.moveinsync.config.core.snapshot.SnapshotCodec;
 import com.moveinsync.config.server.change.ChangeSetService;
+import com.moveinsync.config.server.change.Rejections;
 import com.moveinsync.config.server.state.CurrentState;
 import com.moveinsync.config.server.web.dto.DefinitionRequest;
 import com.moveinsync.config.server.web.dto.DefinitionUpdate;
@@ -28,6 +31,7 @@ public class DefinitionService {
 
     private final ChangeSetService changeSets;
     private final CurrentState currentState;
+    private final Rejections rejections;
 
     public List<SettingDefinition> list() {
         List<SettingDefinition> definitions = new ArrayList<>(currentState.snapshot().definitions().values());
@@ -37,8 +41,10 @@ public class DefinitionService {
 
     public long create(DefinitionRequest request, String author) {
         if (currentState.snapshot().definitions().containsKey(request.key())) {
-            throw new ValidationException(List.of(new ValidationError(0, request.key(), "DEFINITION_EXISTS",
-                    "a setting with this key is already defined; change it with PUT")));
+            List<ValidationError> errors = List.of(new ValidationError(0, request.key(), "DEFINITION_EXISTS",
+                    "a setting with this key is already defined; change it with PUT"));
+            rejections.invalid(ChangeKind.DEFINITION, "*", errors);
+            throw new ValidationException(errors);
         }
         ObjectNode json = SnapshotCodec.mapper().createObjectNode();
         json.put("key", request.key());
@@ -46,7 +52,7 @@ public class DefinitionService {
         json.set("rules", request.rules() == null ? json.objectNode() : request.rules());
         json.set("default", request.defaultValue());
         json.put("description", request.description() == null ? "" : request.description());
-        return changeSets.submitDefinition(SnapshotCodec.definitionFromJson(json), author, "define " + request.key());
+        return changeSets.submitDefinition(parse(json), author, "define " + request.key());
     }
 
     // a new default is how a GLOBAL value changes; the type of a key never changes
@@ -65,7 +71,18 @@ public class DefinitionService {
         if (request.description() != null) {
             json.put("description", request.description());
         }
-        return changeSets.submitDefinition(SnapshotCodec.definitionFromJson(json), author, "update " + key);
+        return changeSets.submitDefinition(parse(json), author, "update " + key);
+    }
+
+    // an unknown type or a default its own rules reject is refused before it reaches the write path
+    private SettingDefinition parse(ObjectNode json) {
+        try {
+            return SnapshotCodec.definitionFromJson(json);
+        } catch (InvalidValueException e) {
+            rejections.invalid(ChangeKind.DEFINITION, "*",
+                    List.of(new ValidationError(0, json.path("key").asText(), e.errorCode(), e.getMessage())));
+            throw e;
+        }
     }
 
     // through the normal write path, so the seeded definitions get versions 1..8 like any other change
