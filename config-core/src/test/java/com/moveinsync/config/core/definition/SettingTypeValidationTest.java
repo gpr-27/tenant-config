@@ -76,6 +76,15 @@ class SettingTypeValidationTest {
         assertThat(type.parse(type.toJson(value))).isEqualTo(value);
     }
 
+    @ParameterizedTest(name = "{0}")
+    @CsvSource({"10", "10.0", "1E+1", "10.000"})
+    void equalNumbersParseToOneForm(String json) {
+        SettingType type = SettingTypes.NUMBER;
+
+        assertThat(type.parse(Seeds.json(json))).isEqualTo(new java.math.BigDecimal("10"));
+        assertThat(type.toJson(type.parse(Seeds.json(json))).toString()).isEqualTo("10");
+    }
+
     @Test
     void timeWindowOvernightDefaultsToFalse() {
         Object value = SettingTypes.TIME_WINDOW.parse(Seeds.json("{\"start\":\"08:00\",\"end\":\"20:00\"}"));

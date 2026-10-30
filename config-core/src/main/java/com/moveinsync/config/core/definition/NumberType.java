@@ -21,7 +21,9 @@ public final class NumberType implements SettingType {
         if (raw == null || !raw.isNumber()) {
             throw mismatch();
         }
-        return raw.decimalValue();
+        // one form per number (10, 10.0 and 1E+1 all become 10), so equal values compare equal everywhere
+        BigDecimal number = raw.decimalValue().stripTrailingZeros();
+        return number.scale() < 0 ? number.setScale(0) : number;
     }
 
     @Override
