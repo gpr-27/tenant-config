@@ -1,0 +1,39 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: config-server
+  datasource:
+    url: ${CONFIG_DB_URL:jdbc:postgresql://localhost:5432/config}
+    username: ${CONFIG_DB_USER:config}
+    password: ${CONFIG_DB_PASSWORD:config}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  jackson:
+    deserialization:
+      # NUMBER settings are BigDecimal; reading 0.1 as a double first would change the value
+      use-big-decimal-for-floats: true
+
+config:
+  jwt:
+    # dev default only; compose and any real deployment set CONFIG_JWT_SECRET
+    secret: ${CONFIG_JWT_SECRET:dev-only-secret-change-me-0123456789abcdef}
+  push:
+    # a quarter of the client read timeout (60 s), so an idle stream is never mistaken for a dead one
+    heartbeat: 15s
+    # one SSE connection per service instance; 2,000 leaves room above 40 services x a few instances
+    maxConnections: 2000
+  recent:
+    # about hours of operator changes; a client further behind takes a full snapshot instead
+    capacity: 1000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info

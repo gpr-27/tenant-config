@@ -1,0 +1,18 @@
+[
+  {"key": "booking.cutoff", "type": "DURATION", "rules": {"min": "PT0M", "max": "PT24H", "lessThan": "booking.maxAdvance"},
+   "default": "PT60M", "description": "How long before departure a booking closes"},
+  {"key": "booking.maxAdvance", "type": "DURATION", "rules": {"min": "PT1H", "max": "PT720H"},
+   "default": "PT168H", "description": "How far ahead an employee may book"},
+  {"key": "ride.maxDuration", "type": "DURATION", "rules": {"min": "PT15M", "max": "PT6H"},
+   "default": "PT2H", "description": "Longest allowed ride"},
+  {"key": "night.window", "type": "TIME_WINDOW", "rules": {"allowOvernight": true},
+   "default": {"start": "22:00", "end": "06:00", "overnight": true}, "description": "Hours that count as night travel"},
+  {"key": "office.hours", "type": "TIME_WINDOW", "rules": {},
+   "default": {"start": "08:00", "end": "20:00"}, "description": "Office opening hours"},
+  {"key": "escort.required", "type": "ENUM", "rules": {"values": ["true", "false"]},
+   "default": "false", "description": "Whether night rides need an escort"},
+  {"key": "cab.types", "type": "LIST", "rules": {"itemType": "ENUM", "values": ["SEDAN", "SUV", "TEMPO"], "maxItems": 3},
+   "default": ["SEDAN", "SUV"], "description": "Cab types an employee may request"},
+  {"key": "booking.maxActive", "type": "NUMBER", "rules": {"integerOnly": true, "min": 1, "max": 10},
+   "default": 3, "description": "Open bookings one employee may hold"}
+]
