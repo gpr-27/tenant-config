@@ -113,6 +113,51 @@ class ChangeSetValidatorTest {
     }
 
     @Test
+    void loweringMaxAdvanceBelowTheCutoffIsRejected() {
+        // cutoff is the PT1H default; nothing touches cutoff itself
+        List<ValidationError> errors = errorsOf(changeSet("acme",
+                set(ScopeKey.client("acme"), "booking.maxAdvance", "\"PT1H\"")));
+
+        assertThat(errors).extracting(ValidationError::operationIndex, ValidationError::code)
+                .containsExactly(tuple(0, "CROSS_FIELD_ORDER"));
+    }
+
+    @Test
+    void clientMaxAdvanceBelowAnOfficeCutoffIsRejected() {
+        Snapshot current = seeded.apply(seeded.version() + 1,
+                changeSet("acme", set(BLR, "booking.cutoff", "\"PT3H\"")));
+
+        List<ValidationError> errors = errorsOf(new ChangeSetValidator(current), changeSet("acme",
+                set(ScopeKey.client("acme"), "booking.maxAdvance", "\"PT2H\"")));
+
+        assertThat(errors).extracting(ValidationError::code).containsExactly("CROSS_FIELD_ORDER");
+        assertThat(errors.get(0).message()).contains("OFFICE blr-ecospace");
+    }
+
+    @Test
+    void changesAtTwoLevelsAreJudgedTogether() {
+        List<ValidationError> errors = errorsOf(changeSet("acme",
+                set(ScopeKey.client("acme"), "booking.maxAdvance", "\"PT2H\""),
+                set(BLR, "booking.cutoff", "\"PT3H\"")));
+
+        assertThat(errors).extracting(ValidationError::operationIndex, ValidationError::code)
+                .containsExactly(tuple(1, "CROSS_FIELD_ORDER"));
+    }
+
+    @Test
+    void anOldViolationElsewhereIsNotBlamedOnAnUnrelatedChange() {
+        // built with apply, which does not validate, to stand for data from before the rule existed
+        Snapshot current = seeded.apply(seeded.version() + 1, changeSet("acme",
+                set(ScopeKey.office("hyd-hitec"), "booking.cutoff", "\"PT10H\""),
+                set(ScopeKey.office("hyd-hitec"), "booking.maxAdvance", "\"PT2H\"")));
+
+        List<Operation> parsed = new ChangeSetValidator(current).validate(changeSet("acme",
+                set(BLR, "booking.cutoff", "\"PT30M\"")));
+
+        assertThat(parsed).hasSize(1);
+    }
+
+    @Test
     void clientScopeMustBeTheChangeSetsOwnTenant() {
         List<ValidationError> errors = errorsOf(changeSet("acme",
                 set(ScopeKey.client("globex"), "booking.cutoff", "\"PT30M\"")));

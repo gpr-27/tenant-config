@@ -12,11 +12,10 @@ import com.moveinsync.config.core.snapshot.Snapshot;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 public final class ChangeSetValidator {
 
@@ -30,9 +29,8 @@ public final class ChangeSetValidator {
     public List<Operation> validate(ChangeSet changeSet) {
         List<ValidationError> errors = new ArrayList<>();
         List<Operation> parsed = new ArrayList<>();
-        // what this change set leaves at each scope: the last SET of a key wins, an UNSET removes it
-        Map<ScopeKey, Map<String, Object>> setValues = new HashMap<>();
-        Map<ScopeKey, Set<String>> unsetKeys = new HashMap<>();
+        // every operation that can be applied, out-of-range values included, so the ordering rule can judge them too
+        List<Operation> applicable = new ArrayList<>();
         List<Operation> operations = changeSet.operations();
 
         for (int i = 0; i < operations.size(); i++) {
@@ -54,9 +52,9 @@ public final class ChangeSetValidator {
                 continue;
             }
             if (op.op() == OpKind.UNSET) {
-                setValues.getOrDefault(op.scope(), new HashMap<>()).remove(op.key());
-                unsetKeys.computeIfAbsent(op.scope(), scope -> new HashSet<>()).add(op.key());
-                parsed.add(new Operation(OpKind.UNSET, op.scope(), op.key(), null));
+                Operation unset = new Operation(OpKind.UNSET, op.scope(), op.key(), null);
+                applicable.add(unset);
+                parsed.add(unset);
                 continue;
             }
 
@@ -67,61 +65,92 @@ public final class ChangeSetValidator {
                 errors.add(new ValidationError(i, op.key(), e.errorCode(), e.getMessage()));
                 continue;
             }
-            // recorded before the rule check so an out-of-range value still gets its cross-field verdict
-            setValues.computeIfAbsent(op.scope(), scope -> new HashMap<>()).put(op.key(), value);
-            unsetKeys.getOrDefault(op.scope(), new HashSet<>()).remove(op.key());
+            Operation set = new Operation(OpKind.SET, op.scope(), op.key(), definition.type().toJson(value));
+            applicable.add(set);
             try {
                 definition.type().validate(value, definition.rules());
             } catch (InvalidValueException e) {
                 errors.add(new ValidationError(i, op.key(), e.errorCode(), e.getMessage()));
                 continue;
             }
-            parsed.add(new Operation(OpKind.SET, op.scope(), op.key(), definition.type().toJson(value)));
+            parsed.add(set);
         }
 
-        checkOrder(changeSet, setValues, unsetKeys, errors);
+        if (!applicable.isEmpty()) {
+            ChangeSet trial = new ChangeSet(changeSet.tenantId(), changeSet.author(), changeSet.reason(), applicable);
+            checkOrder(changeSet, current.apply(current.version() + 1, trial), errors);
+        }
         if (!errors.isEmpty()) {
             throw new ValidationException(errors);
         }
         return parsed;
     }
 
-    // for a SET of K at scope S with lessThan P, compare with P as it will be once this change set is applied
-    private void checkOrder(ChangeSet changeSet, Map<ScopeKey, Map<String, Object>> setValues,
-                            Map<ScopeKey, Set<String>> unsetKeys, List<ValidationError> errors) {
-        List<Operation> operations = changeSet.operations();
-        for (int i = 0; i < operations.size(); i++) {
-            Operation op = operations.get(i);
-            Map<String, Object> atScope = setValues.getOrDefault(op.scope(), Map.of());
-            Object value = atScope.get(op.key());
-            if (op.op() != OpKind.SET || value == null) {
+    // Every lessThan pair the change set touches must hold everywhere in the tenant once it is applied: lowering
+    // maxAdvance at CLIENT can break an OFFICE cutoff, removing an office value can expose the one above it.
+    // A place whose pair this change set does not alter is left alone, so an old problem is not blamed on it.
+    private void checkOrder(ChangeSet changeSet, Snapshot after, List<ValidationError> errors) {
+        String tenantId = changeSet.tenantId();
+        for (SettingDefinition definition : current.definitions().values()) {
+            String key = definition.key();
+            String partner = definition.rules().lessThan();
+            if (partner == null || !current.definitions().containsKey(partner) || !touches(changeSet, key, partner)) {
                 continue;
             }
-            String partner = current.definitions().get(op.key()).rules().lessThan();
-            if (partner == null) {
-                continue;
-            }
-            Object partnerValue = atScope.get(partner);
-            if (partnerValue == null) {
-                boolean removedHere = unsetKeys.getOrDefault(op.scope(), Set.of()).contains(partner);
-                partnerValue = resolvePartner(changeSet.tenantId(), partner, op.scope(), removedHere);
-            }
-            if (!isLess(value, partnerValue)) {
-                errors.add(new ValidationError(i, op.key(), "CROSS_FIELD_ORDER",
-                        op.key() + " must be less than " + partner + " at the same scope"));
+            for (ScopeKey scope : placesToCheck(changeSet, after)) {
+                ScopePath path = pathTo(tenantId, scope);
+                Object value = after.resolve(tenantId, key, path).value();
+                Object limit = after.resolve(tenantId, partner, path).value();
+                boolean changed = !value.equals(current.resolve(tenantId, key, path).value())
+                        || !limit.equals(current.resolve(tenantId, partner, path).value());
+                if (changed && !isLess(value, limit)) {
+                    int blamed = blame(changeSet, key, partner, scope);
+                    errors.add(new ValidationError(blamed, changeSet.operations().get(blamed).key(), "CROSS_FIELD_ORDER",
+                            key + " must be less than " + partner + " at " + scope.level() + " " + scope.id()));
+                }
             }
         }
     }
 
-    // an UNSET of the partner at S in this change set means its value will come from the level above S
-    private Object resolvePartner(String tenantId, String partner, ScopeKey scope, boolean removedHere) {
-        if (!removedHere) {
-            return current.resolve(tenantId, partner, pathTo(tenantId, scope)).value();
+    private static boolean touches(ChangeSet changeSet, String key, String partner) {
+        for (Operation op : changeSet.operations()) {
+            if (op.key().equals(key) || op.key().equals(partner)) {
+                return true;
+            }
         }
-        if (scope.level() == ScopeLevel.CLIENT) {
-            return current.definitions().get(partner).defaultValue();
+        return false;
+    }
+
+    // the tenant's CLIENT level, every scope holding a value before or after, and every scope the change set names
+    private Set<ScopeKey> placesToCheck(ChangeSet changeSet, Snapshot after) {
+        Set<ScopeKey> places = new TreeSet<>(Comparator.comparing(ScopeKey::level).thenComparing(ScopeKey::id));
+        places.add(ScopeKey.client(changeSet.tenantId()));
+        places.addAll(current.tenantOverrides(changeSet.tenantId()).keySet());
+        places.addAll(after.tenantOverrides(changeSet.tenantId()).keySet());
+        for (Operation op : changeSet.operations()) {
+            if (op.scope().level() != ScopeLevel.GLOBAL) {
+                places.add(op.scope());
+            }
         }
-        return current.resolve(tenantId, partner, new ScopePath(tenantId, null, null)).value();
+        return places;
+    }
+
+    // the operation to point at: the lower key at that scope, else the partner there, else the first one on either
+    private static int blame(ChangeSet changeSet, String key, String partner, ScopeKey scope) {
+        List<Operation> operations = changeSet.operations();
+        for (String wanted : List.of(key, partner)) {
+            for (int i = 0; i < operations.size(); i++) {
+                if (operations.get(i).key().equals(wanted) && operations.get(i).scope().equals(scope)) {
+                    return i;
+                }
+            }
+        }
+        for (int i = 0; i < operations.size(); i++) {
+            if (operations.get(i).key().equals(key) || operations.get(i).key().equals(partner)) {
+                return i;
+            }
+        }
+        return 0;
     }
 
     // shift-to-office membership is not modelled, so a SHIFT check does not see an OFFICE-level partner
