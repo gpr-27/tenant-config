@@ -13,7 +13,6 @@ import com.moveinsync.config.core.scope.ScopePath;
 import com.moveinsync.config.core.snapshot.Resolved;
 import com.moveinsync.config.core.snapshot.Snapshot;
 
-import java.io.UncheckedIOException;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.time.Instant;
@@ -226,7 +225,8 @@ public final class ConfigClient implements AutoCloseable {
         current = next;
         try {
             store.save(next);
-        } catch (UncheckedIOException e) {
+        } catch (RuntimeException e) {
+            // the disk copy only matters for a cold start; a failed write must not hold back the update itself
             log.log(Level.WARNING, "could not save snapshot " + next.version() + " to disk: " + e.getMessage());
         }
         for (SnapshotListener listener : listeners) {

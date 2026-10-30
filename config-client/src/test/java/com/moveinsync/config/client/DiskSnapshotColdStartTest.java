@@ -11,6 +11,8 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 import static com.moveinsync.config.client.Fixtures.cutoff;
@@ -97,6 +99,30 @@ class DiskSnapshotColdStartTest {
         transport.push(cutoff(151, "PT20M"));
 
         assertThat(client.version()).isEqualTo(151);
+    }
+
+    @Test
+    void anyStoreFailureStillLetsListenersSeeTheUpdate() {
+        SnapshotStore broken = new SnapshotStore() {
+            @Override
+            public Optional<Snapshot> load() {
+                return Optional.of(at150());
+            }
+
+            @Override
+            public void save(Snapshot snapshot) {
+                throw new IllegalStateException("store closed");
+            }
+        };
+        ConfigClient client = new ConfigClient(Fixtures.options(), transport, broken, new CountingMetrics(), scheduler);
+        List<Long> seen = new ArrayList<>();
+        client.addListener(snapshot -> seen.add(snapshot.version()));
+        client.start();
+
+        transport.push(cutoff(151, "PT20M"));
+
+        assertThat(client.version()).isEqualTo(151);
+        assertThat(seen).contains(151L);
     }
 
     private static Snapshot at150() {
