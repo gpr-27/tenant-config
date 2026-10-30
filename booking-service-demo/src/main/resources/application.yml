@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: booking-service
+  mvc:
+    # the 503 before the first snapshot then carries its reason in "detail"
+    problemdetails:
+      enabled: true
 
 config:
   server-url: ${CONFIG_SERVER_URL:http://localhost:8080}
