@@ -87,6 +87,40 @@ class ChangeSetValidatorTest {
     }
 
     @Test
+    void lessThanSeesAPartnerThatTheSameChangeSetRemoves() {
+        // the office has maxAdvance PT4H; removing it there leaves the PT168H default as the partner
+        Snapshot current = seeded.apply(seeded.version() + 1,
+                changeSet("acme", set(BLR, "booking.maxAdvance", "\"PT4H\"")));
+
+        List<Operation> parsed = new ChangeSetValidator(current).validate(changeSet("acme",
+                unset(BLR, "booking.maxAdvance"),
+                set(BLR, "booking.cutoff", "\"PT10H\"")));
+
+        assertThat(parsed).hasSize(2);
+    }
+
+    @Test
+    void lessThanFailsWhenTheRemovedPartnerFallsBackToSomethingSmaller() {
+        Snapshot current = seeded.apply(seeded.version() + 1, changeSet("acme",
+                set(ScopeKey.client("acme"), "booking.maxAdvance", "\"PT2H\""),
+                set(BLR, "booking.maxAdvance", "\"PT12H\"")));
+
+        List<ValidationError> errors = errorsOf(new ChangeSetValidator(current), changeSet("acme",
+                unset(BLR, "booking.maxAdvance"),
+                set(BLR, "booking.cutoff", "\"PT3H\"")));
+
+        assertThat(errors).extracting(ValidationError::code).containsExactly("CROSS_FIELD_ORDER");
+    }
+
+    @Test
+    void clientScopeMustBeTheChangeSetsOwnTenant() {
+        List<ValidationError> errors = errorsOf(changeSet("acme",
+                set(ScopeKey.client("globex"), "booking.cutoff", "\"PT30M\"")));
+
+        assertThat(errors).extracting(ValidationError::code).containsExactly("CLIENT_SCOPE_MISMATCH");
+    }
+
+    @Test
     void returnsTheOperationsWithCanonicalValues() {
         List<Operation> parsed = validator.validate(changeSet("acme",
                 set(BLR, "booking.cutoff", "\"PT60M\""),
