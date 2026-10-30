@@ -3,9 +3,11 @@ package com.moveinsync.booking;
 import com.moveinsync.config.client.ConfigClient;
 import com.moveinsync.config.core.scope.ScopePath;
 import com.moveinsync.config.core.snapshot.Resolved;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 
@@ -21,6 +23,11 @@ public class BookingController {
     @GetMapping("/bookings/can-book")
     public CanBook canBook(@RequestParam String tenantId, @RequestParam String officeId,
                            @RequestParam long departureInMinutes) {
+        // version 0 means no snapshot yet: neither the server nor the disk copy has been read. Say so plainly
+        // instead of failing on the missing definition
+        if (client.version() == 0) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "configuration not loaded yet");
+        }
         // one resolve gives the value and the version it came from together, and it is timed for the read metric
         Resolved resolved = client.explain(tenantId, "booking.cutoff", new ScopePath(tenantId, officeId, null));
         Duration cutoff = (Duration) resolved.value();

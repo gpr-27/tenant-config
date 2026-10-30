@@ -44,7 +44,7 @@ curl -s "localhost:8081/bookings/can-book?tenantId=acme&officeId=blr-ecospace&de
 # after the change:  {"allowed":true,"cutoff":"PT30M","configVersion":9}
 ```
 
-Use `officeId=hyd-hitec` to see an office without an override fall back to the 60 min default. Metrics are on
+Use `officeId=hyd-hitec` to see an office without an override fall back to the 60 min default. In the first second or two after start, before the demo has pulled its first snapshot, `can-book` answers 503 `configuration not loaded yet`. Metrics are on
 `localhost:8080/actuator/prometheus` (server: `config_server_version`, `config_push_connections`,
 `config_changes_total`, ...) and `localhost:8081/actuator/prometheus` (client: `config_client_version`,
 `config_client_lag_versions`, `config_client_reconnects_total`, `config_client_read_latency_seconds`, ...).
