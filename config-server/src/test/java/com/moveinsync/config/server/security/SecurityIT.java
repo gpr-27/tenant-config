@@ -7,6 +7,7 @@ import com.moveinsync.config.server.state.StateLoader;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.actuate.health.HealthEndpointGroups;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,6 +43,8 @@ class SecurityIT {
     JdbcTemplate jdbc;
     @Autowired
     StateLoader stateLoader;
+    @Autowired
+    HealthEndpointGroups healthGroups;
 
     @BeforeEach
     void cleanState() {
@@ -158,6 +161,16 @@ class SecurityIT {
                 "config_changes_total{kind=\"DEFINITION\",result=\"accepted\"}", "config_push_send_failures_total",
                 "config_resolve_latency_seconds", "config_push_queue_depth",
                 "config_changes_total{kind=\"ROLLBACK\",result=\"rejected\"}");
+    }
+
+    @Test
+    void livenessProbeIsPublicAndIgnoresTheDatabase() throws Exception {
+        mvc.perform(get("/actuator/health/liveness"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"));
+
+        assertThat(healthGroups.get("liveness").isMember("db")).isFalse();
+        assertThat(healthGroups.getPrimary().isMember("db")).isTrue();
     }
 
     private ResultActions postChange(String bearer, String tenant) throws Exception {

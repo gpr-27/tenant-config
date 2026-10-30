@@ -32,7 +32,7 @@ public class ServerMetrics {
                 .description("events held for delta catch-up")
                 .register(registry);
         this.pushSendFailures = Counter.builder("config.push.send.failures")
-                .description("SSE writes that failed and dropped their connection")
+                .description("SSE writes that failed for a reason other than the client going away")
                 .register(registry);
         this.resolveLatency = Timer.builder("config.resolve.latency")
                 .description("time to resolve one key through the REST API")

@@ -10,8 +10,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.web.util.DisconnectedClientHelper;
 
 import java.io.IOException;
 import java.util.List;
@@ -57,9 +59,14 @@ public class PushHub {
     }
 
     public SseEmitter subscribe(long lastVersion) {
-        UUID id = UUID.randomUUID();
         // no server-side timeout: a dead connection is found by the next failed write (heartbeat at the latest)
-        SseEmitter emitter = new SseEmitter(0L);
+        return subscribe(lastVersion, new SseEmitter(0L));
+    }
+
+    // takes the emitter so a test can hand in one whose writes fail
+    SseEmitter subscribe(long lastVersion, SseEmitter emitter) {
+        UUID id = UUID.randomUUID();
+        // the container reports a disconnect it notices on its own; the connection is dropped there and then
         emitter.onCompletion(() -> remove(id));
         emitter.onTimeout(() -> remove(id));
         emitter.onError(error -> remove(id));
@@ -71,6 +78,8 @@ public class PushHub {
                 throw new TooManyConnectionsException();
             }
             emitters.put(id, emitter);
+            // the response goes out with the first write; without this a client would wait for the first heartbeat
+            enqueue(id, emitter, SseEmitter.event().comment(" connected").build());
             Optional<List<ChangeEvent>> missed = recentChanges.since(lastVersion);
             // a client ahead of us saw a version this server no longer has (restored database): it must resync too
             resync = missed.isEmpty() || lastVersion > currentState.snapshot().version();
@@ -126,15 +135,19 @@ public class PushHub {
         stripes[Math.floorMod(id.hashCode(), STRIPES)].execute(() -> send(id, emitter, frame));
     }
 
+    // a client that went away is how a stream normally ends, so only writes that failed for another reason count
     private void send(UUID id, SseEmitter emitter, Set<DataWithMediaType> frame) {
         try {
             emitter.send(frame);
         } catch (IOException | IllegalStateException e) {
-            // the container reports the broken connection itself; we only stop writing to it
-            if (remove(id)) {
+            if (remove(id) && !clientGone(e)) {
                 metrics.pushSendFailed();
             }
         }
+    }
+
+    private static boolean clientGone(Exception e) {
+        return e instanceof AsyncRequestNotUsableException || DisconnectedClientHelper.isClientDisconnectedException(e);
     }
 
     private boolean remove(UUID id) {

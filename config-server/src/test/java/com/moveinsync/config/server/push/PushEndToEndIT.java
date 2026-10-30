@@ -97,6 +97,16 @@ class PushEndToEndIT {
         await().atMost(Duration.ofSeconds(5)).until(() -> client.version() == 8);
     }
 
+    @Test
+    void upToDateSubscriberGetsTheResponseAndAConnectedCommentStraightAway() throws Exception {
+        HttpResponse<InputStream> response = openStream(8);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+            assertThat(reader.readLine()).isEqualTo(": connected");
+        }
+    }
+
     private ConfigClient startClient(Path dir) {
         ConfigClientOptions options = ConfigClientOptions.defaults(URI.create("http://localhost:" + port),
                 () -> jwt.issue("booking-svc", Role.SERVICE, null), dir.resolve("snapshot.json"));
@@ -128,30 +138,40 @@ class PushEndToEndIT {
         return http.send(request, HttpResponse.BodyHandlers.ofString()).body();
     }
 
-    // reads the raw stream until `frames` blank-line-terminated frames have arrived, then hangs up
+    // reads the raw stream until `frames` event frames have arrived, then hangs up; comment-only frames
+    // (": connected", ": ping") are skipped, as an SSE reader would
     private List<String> firstFrames(long lastEventId, int frames) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/config/stream"))
-                .header("Authorization", "Bearer " + jwt.issue("booking-svc", Role.SERVICE, null))
-                .header("Accept", "text/event-stream")
-                .header("Last-Event-ID", String.valueOf(lastEventId))
-                .build();
-        HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<InputStream> response = openStream(lastEventId);
         assertThat(response.statusCode()).isEqualTo(200);
         List<String> lines = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
             int seen = 0;
+            boolean inEvent = false;
             while (seen < frames) {
                 String line = reader.readLine();
                 if (line == null) {
                     break;
                 }
-                if (line.isEmpty()) {
+                if (line.isEmpty() && inEvent) {
                     seen++;
-                } else if (!line.startsWith(":")) {
+                    inEvent = false;
+                } else if (!line.isEmpty() && !line.startsWith(":")) {
                     lines.add(line);
+                    inEvent = true;
                 }
             }
         }
         return lines;
+    }
+
+    private HttpResponse<InputStream> openStream(long lastEventId) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/config/stream"))
+                .header("Authorization", "Bearer " + jwt.issue("booking-svc", Role.SERVICE, null))
+                .header("Accept", "text/event-stream")
+                .header("Last-Event-ID", String.valueOf(lastEventId))
+                // well under the 15 s heartbeat: only an immediate first write gets the headers here in time
+                .timeout(Duration.ofSeconds(3))
+                .build();
+        return http.send(request, HttpResponse.BodyHandlers.ofInputStream());
     }
 }
