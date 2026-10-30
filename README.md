@@ -404,10 +404,6 @@ Staleness: at most 5 s with the stream connected (tens of milliseconds in practi
 lost, and unbounded while the server is unreachable. During an outage `config_client_reconnects_total` keeps
 climbing; when the server answers again the heal poll records `config_client_lag_versions`.
 
-## Demo video
-
-Demo video: _link to be added_
-
 ## Tunables
 
 | Setting | Where | Default | Why this value |
