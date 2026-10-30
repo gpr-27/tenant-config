@@ -23,6 +23,6 @@ public class RollbackController {
     public RollbackResponse rollback(@PathVariable String tenantId, @Valid @RequestBody RollbackRequest request,
                                      Authentication auth) {
         TenantGuard.check(auth, tenantId);
-        return rollbacks.rollback(tenantId, request.targetVersion(), request.dryRun(), auth.getName());
+        return rollbacks.rollback(tenantId, request.targetVersion(), request.previewOnly(), auth.getName());
     }
 }

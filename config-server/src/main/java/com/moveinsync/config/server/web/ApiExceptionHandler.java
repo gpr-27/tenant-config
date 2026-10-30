@@ -8,11 +8,14 @@ import com.moveinsync.config.core.error.ValidationException;
 import com.moveinsync.config.server.change.IdempotencyConflictException;
 import com.moveinsync.config.server.push.TooManyConnectionsException;
 import com.moveinsync.config.server.rollback.VersionNotFoundException;
+import com.moveinsync.config.server.rollout.StagedChangeSupersededException;
 import com.moveinsync.config.server.security.TenantAccessDeniedException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.ConversionNotSupportedException;
+import org.springframework.beans.TypeMismatchException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -24,17 +27,19 @@ import org.springframework.lang.Nullable;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.transaction.TransactionException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.NativeWebRequest;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 
-// the one place exceptions become HTTP: RFC 7807 bodies plus errorCode, requestId and (for 422) errors[]
+// the one place exceptions become HTTP: RFC 7807 bodies plus errorCode, requestId and (for 400/422) errors[]
 @Slf4j
 @RestControllerAdvice
 @RequiredArgsConstructor
@@ -74,6 +79,12 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return respond(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", e.getMessage(), request);
     }
 
+    @ExceptionHandler(StagedChangeSupersededException.class)
+    ResponseEntity<ProblemDetail> stagedChangeSuperseded(StagedChangeSupersededException e,
+                                                         HttpServletRequest request) {
+        return respond(HttpStatus.CONFLICT, "STAGED_CHANGE_SUPERSEDED", e.getMessage(), request);
+    }
+
     @ExceptionHandler(TooManyConnectionsException.class)
     ResponseEntity<ProblemDetail> pushCapacity(TooManyConnectionsException e, HttpServletRequest request) {
         ProblemDetail problem = problem(HttpStatus.SERVICE_UNAVAILABLE, "PUSH_CAPACITY", e.getMessage(), request);
@@ -108,6 +119,44 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemDetail> unexpected(Exception e, HttpServletRequest request) {
         log.error("unexpected error", e);
         return respond(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL", "Unexpected error", request);
+    }
+
+    // Spring's default detail quotes the submitted text back ("... with value: 'abc123'"); name only the parameter
+    @Override
+    protected ResponseEntity<Object> handleTypeMismatch(TypeMismatchException ex, HttpHeaders headers,
+                                                        HttpStatusCode status, WebRequest request) {
+        String detail = "invalid value for '" + ex.getPropertyName() + "'";
+        return handleExceptionInternal(ex, ProblemDetail.forStatusAndDetail(status, detail), headers, status, request);
+    }
+
+    @Override
+    protected ResponseEntity<Object> handleConversionNotSupported(ConversionNotSupportedException ex,
+                                                                  HttpHeaders headers, HttpStatusCode status,
+                                                                  WebRequest request) {
+        return handleTypeMismatch(ex, headers, status, request);
+    }
+
+    // a missing reason or an empty operations list: say which field and which constraint, never the value
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(MethodArgumentNotValidException ex,
+                                                                  HttpHeaders headers, HttpStatusCode status,
+                                                                  WebRequest request) {
+        return invalidFields(ex, FieldProblem.from(ex.getBindingResult().getAllErrors()), headers, status, request);
+    }
+
+    @Override
+    protected ResponseEntity<Object> handleHandlerMethodValidationException(HandlerMethodValidationException ex,
+                                                                            HttpHeaders headers,
+                                                                            HttpStatusCode status,
+                                                                            WebRequest request) {
+        return invalidFields(ex, FieldProblem.from(ex), headers, status, request);
+    }
+
+    private ResponseEntity<Object> invalidFields(Exception ex, List<FieldProblem> errors, HttpHeaders headers,
+                                                 HttpStatusCode status, WebRequest request) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, errors.size() + " field(s) failed validation");
+        problem.setProperty("errors", errors);
+        return handleExceptionInternal(ex, problem, headers, status, request);
     }
 
     // Spring's own 4xx (unreadable body, missing parameter, wrong method...) get the same two extra fields

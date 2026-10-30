@@ -11,6 +11,8 @@ import com.moveinsync.config.server.web.dto.ChangeLogEntry;
 import com.moveinsync.config.server.web.dto.ChangeRequest;
 import com.moveinsync.config.server.web.dto.VersionResponse;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
@@ -54,9 +56,10 @@ public class ChangeController {
     @GetMapping("/changes")
     public List<ChangeLogEntry> history(@PathVariable String tenantId,
                                         @RequestParam(defaultValue = "0") long since,
-                                        @RequestParam(defaultValue = "50") int limit, Authentication auth) {
+                                        @RequestParam(defaultValue = "50") @Min(1) @Max(MAX_PAGE) int limit,
+                                        Authentication auth) {
         TenantGuard.check(auth, tenantId);
-        Pageable page = Pageable.ofSize(Math.min(Math.max(limit, 1), MAX_PAGE));
+        Pageable page = Pageable.ofSize(limit);
         List<ChangeLogEntry> entries = new ArrayList<>();
         for (ChangeEntity change : changes.findByTenantIdAndVersionGreaterThanOrderByVersionAsc(tenantId, since, page)) {
             entries.add(new ChangeLogEntry(change.getVersion(), change.getAuthor(), change.getReason(),
