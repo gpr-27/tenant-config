@@ -10,8 +10,12 @@ import com.moveinsync.config.core.change.ChangeSet;
 import com.moveinsync.config.core.change.OpKind;
 import com.moveinsync.config.core.change.Operation;
 import com.moveinsync.config.core.scope.ScopeKey;
+import com.moveinsync.config.core.snapshot.Snapshot;
 import com.moveinsync.config.server.ConfigServerApplication;
 import com.moveinsync.config.server.change.ChangeSetService;
+import com.moveinsync.config.server.state.CurrentState;
+import com.moveinsync.config.server.state.RecentChanges;
+import com.moveinsync.config.server.state.StateLoader;
 import jakarta.persistence.EntityManagerFactory;
 import org.hibernate.SessionFactory;
 import org.hibernate.stat.Statistics;
@@ -42,8 +46,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-// 500 clients lose their streams to a web server restart, two changes land meanwhile, and all of them catch up
-// by Last-Event-ID replay from RecentChanges. The scenario runs once; each test checks one thing it promised.
+// 500 clients lose their streams to a server restart, two changes land meanwhile, and all of them catch up
+// by Last-Event-ID replay from the RecentChanges ring the restarted server rebuilt from the database. The scenario runs once; each test checks one thing it promised.
 @SpringBootTest(classes = ConfigServerApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT,
         properties = "spring.jpa.properties.hibernate.generate_statistics=true")
 @Import(TestDatabase.class)
@@ -65,6 +69,12 @@ class ReconnectStormTest {
     ChangeSetService changeSets;
     @Autowired
     EntityManagerFactory entityManagerFactory;
+    @Autowired
+    CurrentState currentState;
+    @Autowired
+    RecentChanges recentChanges;
+    @Autowired
+    StateLoader stateLoader;
 
     private final List<ConfigClient> clients = new ArrayList<>();
     private final List<CountingClientMetrics> metrics = new ArrayList<>();
@@ -101,6 +111,10 @@ class ReconnectStormTest {
         // committed while every stream is down, so the reconnect has something to replay rather than an empty catch-up
         submit("PT40M");
         long target = submit("PT41M");
+        // a restarted process starts with empty memory and reloads values, version and ring from the database
+        currentState.replace(Snapshot.empty());
+        recentChanges.clear();
+        stateLoader.load();
 
         Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
         long statementsBefore = statistics.getPrepareStatementCount();
