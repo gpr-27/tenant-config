@@ -44,7 +44,7 @@ holds an immutable snapshot equal to exactly one version, and readers read from 
 state between two versions and a multi-key change is all-or-nothing. Clients are eventually consistent with a
 staleness bound of 5 s while pushes arrive and 30 s when a push is lost; while the server is unreachable the bound
 is open, the client keeps serving its last version, and the metrics show it. Clients can briefly be at different
-versions, but each one passes through the same versions in the same order and never goes back.
+versions, but each one passes through the same versions in the same order and never goes back, except when the server's database is restored to an older version: then clients follow it back.
 
 ## Failure modes
 
