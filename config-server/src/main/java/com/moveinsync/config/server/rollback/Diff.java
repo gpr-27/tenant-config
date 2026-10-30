@@ -5,6 +5,7 @@ import com.moveinsync.config.core.change.Operation;
 import com.moveinsync.config.core.definition.SettingDefinition;
 import com.moveinsync.config.core.scope.ScopeKey;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -38,12 +39,20 @@ public final class Diff {
             Object then = target.getOrDefault(slot.scope(), Map.of()).get(slot.key());
             if (then == null) {
                 operations.add(new Operation(OpKind.UNSET, slot.scope(), slot.key(), null));
-            } else if (!then.equals(now)) {
+            } else if (!same(then, now)) {
                 SettingDefinition definition = definitions.get(slot.key());
                 operations.add(new Operation(OpKind.SET, slot.scope(), slot.key(), definition.type().toJson(then)));
             }
         }
         return operations;
+    }
+
+    // BigDecimal.equals also compares scale: 1E+1 (a client's 10.0) and 10 (read back from jsonb) are one value
+    public static boolean same(Object then, Object now) {
+        if (then instanceof BigDecimal a && now instanceof BigDecimal b) {
+            return a.compareTo(b) == 0;
+        }
+        return then.equals(now);
     }
 
     private static void addSlots(Map<ScopeKey, Map<String, Object>> state, TreeSet<Slot> slots) {

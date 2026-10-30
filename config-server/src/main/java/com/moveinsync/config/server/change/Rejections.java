@@ -28,8 +28,9 @@ public class Rejections {
         log.warn("change set rejected tenant={} kind={} errors={}", tenantId, kind, codes);
     }
 
-    public void idempotencyConflict(ChangeKind kind, String tenantId) {
+    // a refusal judged against the stored state (409) rather than against the request's own operations
+    public void conflict(ChangeKind kind, String tenantId, String code) {
         metrics.changeRejected(kind, List.of());
-        log.warn("change set rejected tenant={} kind={} errors=[IDEMPOTENCY_CONFLICT]", tenantId, kind);
+        log.warn("change set rejected tenant={} kind={} errors=[{}]", tenantId, kind, code);
     }
 }

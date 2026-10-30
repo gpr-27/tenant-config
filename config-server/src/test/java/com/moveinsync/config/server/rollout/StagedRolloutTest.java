@@ -9,6 +9,7 @@ import com.moveinsync.config.server.security.JwtService;
 import com.moveinsync.config.server.security.Role;
 import com.moveinsync.config.server.state.CurrentState;
 import com.moveinsync.config.server.state.StateLoader;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +42,8 @@ class StagedRolloutTest {
     JdbcTemplate jdbc;
     @Autowired
     StateLoader stateLoader;
+    @Autowired
+    MeterRegistry registry;
 
     @BeforeEach
     void cleanState() {
@@ -87,11 +90,99 @@ class StagedRolloutTest {
                 .andExpect(jsonPath("$.errorCode").value("VERSION_NOT_FOUND"));
     }
 
-    private ResultActions stage() throws Exception {
+    @Test
+    void officesThatDisagreeOnAValueCannotBePromoted() throws Exception {
         String body = """
-                {"reason": "try 30m in two offices first", "targetOffices": ["blr-ecospace", "hyd-hitec"],
-                 "operations": [{"key": "booking.cutoff", "value": "PT30M"}]}
+                {"reason": "two offices, two values", "operations": [
+                  {"op": "SET", "level": "OFFICE", "scopeId": "blr-ecospace", "key": "booking.cutoff", "value": "PT30M"},
+                  {"op": "SET", "level": "OFFICE", "scopeId": "hyd-hitec", "key": "booking.cutoff", "value": "PT45M"}]}
                 """;
+        String created = mvc.perform(post("/api/v1/tenants/acme/changes").header("Authorization", bearer())
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        long mixed = JsonPath.parse(created).read("$.version", Long.class);
+        double rejectedBefore = registry.counter("config.changes", "kind", "PROMOTE", "result", "rejected").count();
+
+        mvc.perform(post("/api/v1/tenants/acme/changes/" + mixed + "/promote").header("Authorization", bearer()))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errors[0].code").value("NOT_A_STAGED_CHANGE"))
+                .andExpect(jsonPath("$.errors[0].message")
+                        .value("the offices disagree on the value for booking.cutoff"));
+
+        assertThat(currentState.snapshot().version()).isEqualTo(mixed);
+        assertThat(registry.counter("config.changes", "kind", "PROMOTE", "result", "rejected").count())
+                .isEqualTo(rejectedBefore + 1);
+    }
+
+    @Test
+    void sameStagedVersionCannotBePromotedTwice() throws Exception {
+        long staged = JsonPath.parse(stage().andReturn().getResponse().getContentAsString()).read("$.version", Long.class);
+        promote(staged).andExpect(status().isCreated());
+
+        promote(staged).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode").value("STAGED_CHANGE_SUPERSEDED"));
+
+        assertThat(currentState.snapshot().version()).isEqualTo(staged + 1);
+    }
+
+    @Test
+    void officeChangedAgainSinceStagingMakesThePromoteAConflictThatWritesNothing() throws Exception {
+        long staged = JsonPath.parse(stage("PT45M").andReturn().getResponse().getContentAsString())
+                .read("$.version", Long.class);
+        long newer = submit("""
+                {"reason": "blr wants 50m", "operations": [
+                  {"op": "SET", "level": "OFFICE", "scopeId": "blr-ecospace", "key": "booking.cutoff", "value": "PT50M"}]}
+                """);
+        double rejectedBefore = registry.counter("config.changes", "kind", "PROMOTE", "result", "rejected").count();
+
+        String body = promote(staged).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode").value("STAGED_CHANGE_SUPERSEDED"))
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(body).contains("blr-ecospace", "booking.cutoff").doesNotContain("PT45M", "PT50M");
+        assertThat(currentState.snapshot().version()).isEqualTo(newer);
+        cutoffAt("blr-ecospace").andExpect(jsonPath("$.value").value("PT50M"));
+        cutoffAt("pune-magarpatta").andExpect(jsonPath("$.value").value("PT1H"));
+        assertThat(registry.counter("config.changes", "kind", "PROMOTE", "result", "rejected").count())
+                .isEqualTo(rejectedBefore + 1);
+    }
+
+    @Test
+    void onePilotOfficeChangeIsPromotedToEveryOffice() throws Exception {
+        long pilot = submit("""
+                {"reason": "pilot in blr", "operations": [
+                  {"op": "SET", "level": "OFFICE", "scopeId": "blr-ecospace", "key": "booking.cutoff", "value": "PT30M"}]}
+                """);
+
+        promote(pilot).andExpect(status().isCreated());
+
+        cutoffAt("pune-magarpatta").andExpect(jsonPath("$.value").value("PT30M"))
+                .andExpect(jsonPath("$.source").value("CLIENT"));
+        cutoffAt("blr-ecospace").andExpect(jsonPath("$.source").value("CLIENT"));
+    }
+
+    private ResultActions promote(long version) throws Exception {
+        return mvc.perform(post("/api/v1/tenants/acme/changes/" + version + "/promote").header("Authorization", bearer()));
+    }
+
+    private long submit(String body) throws Exception {
+        String created = mvc.perform(post("/api/v1/tenants/acme/changes").header("Authorization", bearer())
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return JsonPath.parse(created).read("$.version", Long.class);
+    }
+
+    private ResultActions stage() throws Exception {
+        return stage("PT30M");
+    }
+
+    private ResultActions stage(String value) throws Exception {
+        String body = """
+                {"reason": "try a new cutoff in two offices first", "targetOffices": ["blr-ecospace", "hyd-hitec"],
+                 "operations": [{"key": "booking.cutoff", "value": "%s"}]}
+                """.formatted(value);
         return mvc.perform(post("/api/v1/tenants/acme/changes/staged").header("Authorization", bearer())
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }

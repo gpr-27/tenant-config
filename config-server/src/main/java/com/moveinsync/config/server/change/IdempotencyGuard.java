@@ -29,7 +29,7 @@ public class IdempotencyGuard {
             return Optional.empty();
         }
         if (!earlier.get().getRequestHash().equals(requestHash)) {
-            rejections.idempotencyConflict(kind, tenantId);
+            rejections.conflict(kind, tenantId, "IDEMPOTENCY_CONFLICT");
             throw new IdempotencyConflictException();
         }
         return Optional.of(earlier.get().getVersion());
