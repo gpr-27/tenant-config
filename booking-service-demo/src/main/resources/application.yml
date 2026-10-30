@@ -1,0 +1,19 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: booking-service
+
+config:
+  server-url: ${CONFIG_SERVER_URL:http://localhost:8080}
+  username: ${BOOKING_SERVICE_USER:booking-svc}
+  password: ${BOOKING_SERVICE_PASSWORD:svc}
+  # /data is the compose volume, so the copy survives a restart; for a local run set BOOKING_SNAPSHOT_FILE=./booking-data/snapshot.json
+  snapshot-file: ${BOOKING_SNAPSHOT_FILE:/data/snapshot.json}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
