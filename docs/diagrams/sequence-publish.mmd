@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant Op as Operator
+    participant Ctl as ChangeController<br/>(TenantGuard)
+    participant Svc as ChangeSetService
+    participant DB as PostgreSQL
+    participant St as CurrentState
+    participant Hub as PushHub
+    participant Cl as ConfigClient
+    participant Bk as Booking code
+
+    Op->>Ctl: POST /tenants/acme/changes {SET booking.cutoff=PT30M @ OFFICE blr}
+    Ctl->>Ctl: token role + tenant match
+    Ctl->>Svc: submit(changeSet, CHANGE, idempotencyKey)
+    Svc->>Svc: writeLock.lock()
+    Svc->>Svc: ChangeSetValidator(current).validate → 422 on error
+    Svc->>DB: BEGIN, INSERT config_change RETURNING version
+    Note over DB: version 144 is assigned here
+    Svc->>DB: UPSERT config_override, COMMIT
+    Svc->>St: apply(144, changeSet) → new Snapshot, AtomicReference.set
+    Svc->>Hub: publish(event 144)   (only after commit)
+    Svc->>Svc: writeLock.unlock()
+    Svc-->>Ctl: 144
+    Ctl-->>Op: 201 {version: 144}
+
+    Hub-->>Cl: SSE  id: 144  data: {event}
+    Cl->>Cl: 144 == local+1 → snapshot.apply(event)
+    Note over Cl: readers switch here: one AtomicReference.set
+    Cl->>Cl: store.save (tmp file + atomic move)
+    Cl-->>Bk: listener: config updated version=144
+    Bk->>Cl: snapshot().get("booking.cutoff", OFFICE blr)
+    Cl-->>Bk: PT30M (source OFFICE, version 144)

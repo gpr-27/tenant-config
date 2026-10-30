@@ -1,0 +1,220 @@
+{
+  "info": {
+    "name": "tenant-config",
+    "description": "Config server API. Run 'Login as acme-ops' first; it stores the token in the collection variable.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base", "value": "http://localhost:8080" },
+    { "key": "token", "value": "" },
+    { "key": "tenant", "value": "acme" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [ { "key": "token", "value": "{{token}}", "type": "string" } ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login as acme-ops (OPERATOR)",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('token', pm.response.json().token);"
+          ] } } ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/auth/token",
+            "body": { "mode": "raw", "raw": "{\"username\":\"acme-ops\",\"password\":\"ops\"}" }
+          }
+        },
+        {
+          "name": "Login as admin (ADMIN)",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('token', pm.response.json().token);"
+          ] } } ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/auth/token",
+            "body": { "mode": "raw", "raw": "{\"username\":\"admin\",\"password\":\"admin\"}" }
+          }
+        },
+        {
+          "name": "Login as booking-svc (SERVICE)",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('token', pm.response.json().token);"
+          ] } } ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/auth/token",
+            "body": { "mode": "raw", "raw": "{\"username\":\"booking-svc\",\"password\":\"svc\"}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Definitions",
+      "item": [
+        {
+          "name": "List definitions",
+          "request": { "method": "GET", "url": "{{base}}/api/v1/definitions" }
+        },
+        {
+          "name": "Create definition (ADMIN)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/definitions",
+            "body": { "mode": "raw", "raw": "{\"key\":\"ride.maxStops\",\"type\":\"NUMBER\",\"rules\":{\"integerOnly\":true,\"min\":0,\"max\":5},\"default\":2,\"description\":\"Maximum pickup stops on one ride\"}" }
+          }
+        },
+        {
+          "name": "Update definition default (ADMIN)",
+          "request": {
+            "method": "PUT",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/definitions/ride.maxStops",
+            "body": { "mode": "raw", "raw": "{\"default\":3}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Changes",
+      "item": [
+        {
+          "name": "Set booking.cutoff = PT30M at OFFICE blr-ecospace",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "pilot-blr-001" }
+            ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/changes",
+            "body": { "mode": "raw", "raw": "{\"reason\":\"pilot\",\"operations\":[{\"op\":\"SET\",\"level\":\"OFFICE\",\"scopeId\":\"blr-ecospace\",\"key\":\"booking.cutoff\",\"value\":\"PT30M\"}]}" }
+          }
+        },
+        {
+          "name": "Invalid value: cutoff PT-30M -> 422",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/changes",
+            "body": { "mode": "raw", "raw": "{\"reason\":\"typo\",\"operations\":[{\"op\":\"SET\",\"level\":\"OFFICE\",\"scopeId\":\"blr-ecospace\",\"key\":\"booking.cutoff\",\"value\":\"PT-30M\"}]}" }
+          }
+        },
+        {
+          "name": "Invalid window: office.hours ends before it starts -> 422",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/changes",
+            "body": { "mode": "raw", "raw": "{\"reason\":\"typo\",\"operations\":[{\"op\":\"SET\",\"level\":\"CLIENT\",\"scopeId\":\"acme\",\"key\":\"office.hours\",\"value\":{\"start\":\"20:00\",\"end\":\"08:00\"}}]}" }
+          }
+        },
+        {
+          "name": "Atomic two-key change: cutoff + maxAdvance",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/changes",
+            "body": { "mode": "raw", "raw": "{\"reason\":\"new booking policy\",\"operations\":[{\"op\":\"SET\",\"level\":\"CLIENT\",\"scopeId\":\"acme\",\"key\":\"booking.cutoff\",\"value\":\"PT2H\"},{\"op\":\"SET\",\"level\":\"CLIENT\",\"scopeId\":\"acme\",\"key\":\"booking.maxAdvance\",\"value\":\"PT4H\"}]}" }
+          }
+        },
+        {
+          "name": "Change log",
+          "request": { "method": "GET", "url": "{{base}}/api/v1/tenants/{{tenant}}/changes?since=0&limit=50" }
+        },
+        {
+          "name": "Delete override (UNSET)",
+          "request": { "method": "DELETE", "url": "{{base}}/api/v1/tenants/{{tenant}}/overrides/OFFICE/blr-ecospace/booking.cutoff" }
+        }
+      ]
+    },
+    {
+      "name": "Rollout and rollback",
+      "item": [
+        {
+          "name": "Stage to two offices",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/changes/staged",
+            "body": { "mode": "raw", "raw": "{\"reason\":\"try 30m in two offices first\",\"targetOffices\":[\"blr-ecospace\",\"hyd-hitec\"],\"operations\":[{\"key\":\"booking.cutoff\",\"value\":\"PT30M\"}]}" }
+          }
+        },
+        {
+          "name": "Promote staged version to CLIENT",
+          "request": { "method": "POST", "url": "{{base}}/api/v1/tenants/{{tenant}}/changes/3/promote" }
+        },
+        {
+          "name": "Rollback dry run",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/rollback",
+            "body": { "mode": "raw", "raw": "{\"targetVersion\":1,\"dryRun\":true}" }
+          }
+        },
+        {
+          "name": "Rollback apply",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{base}}/api/v1/tenants/{{tenant}}/rollback",
+            "body": { "mode": "raw", "raw": "{\"targetVersion\":1,\"dryRun\":false}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Resolve",
+      "item": [
+        {
+          "name": "Resolve booking.cutoff for blr-ecospace, explain",
+          "request": { "method": "GET", "url": "{{base}}/api/v1/tenants/{{tenant}}/resolve?key=booking.cutoff&officeId=blr-ecospace&explain=true" }
+        },
+        {
+          "name": "Resolve booking.cutoff for hyd-hitec",
+          "request": { "method": "GET", "url": "{{base}}/api/v1/tenants/{{tenant}}/resolve?key=booking.cutoff&officeId=hyd-hitec" }
+        }
+      ]
+    },
+    {
+      "name": "Stream (SERVICE)",
+      "item": [
+        {
+          "name": "Current version",
+          "request": { "method": "GET", "url": "{{base}}/api/v1/config/version" }
+        },
+        {
+          "name": "Snapshot since 0 (full)",
+          "request": { "method": "GET", "url": "{{base}}/api/v1/config/snapshot?since=0" }
+        },
+        {
+          "name": "SSE stream (keeps the connection open)",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "Last-Event-ID", "value": "0" } ],
+            "url": "{{base}}/api/v1/config/stream"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health and metrics",
+      "item": [
+        { "name": "Health", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base}}/actuator/health" } },
+        { "name": "Prometheus", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base}}/actuator/prometheus" } },
+        { "name": "Booking demo: can-book?", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "http://localhost:8081/bookings/can-book?tenantId=acme&officeId=blr-ecospace&departureInMinutes=45" } },
+        { "name": "Booking demo: client metrics", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "http://localhost:8081/actuator/prometheus" } }
+      ]
+    }
+  ]
+}

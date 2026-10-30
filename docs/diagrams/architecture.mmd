@@ -1,0 +1,29 @@
+flowchart LR
+    OP["Operator<br/>REST + JWT"]
+    subgraph CS["config-server · one Spring Boot app"]
+        direction TB
+        LOCK["write lock<br/>validate → tx: log, v++ → memory → publish"]
+        STATE["CurrentState<br/>AtomicReference of Snapshot"]
+        RING["RecentChanges<br/>ring of last 1000 events"]
+        HUB["PushHub<br/>SSE, 8 striped executors"]
+        LOCK --> STATE
+        LOCK --> RING
+        LOCK --> HUB
+    end
+    PG[("PostgreSQL<br/>config_change log<br/>config_override current")]
+    OP --> LOCK
+    LOCK --> PG
+
+    subgraph C1["booking-service"]
+        B1["ConfigClient<br/>Snapshot vN · disk copy"]
+    end
+    subgraph C2["tracking-service"]
+        B2["ConfigClient<br/>Snapshot vN · disk copy"]
+    end
+    MORE["… ×40 services"]
+
+    HUB -- "SSE push, milliseconds" --> B1
+    HUB -- "SSE push, milliseconds" --> B2
+    B1 -. "GET /version every 30 s<br/>GET /snapshot?since=V" .-> CS
+    B2 -. "heal poll" .-> CS
+    HUB --> MORE
