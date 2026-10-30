@@ -32,7 +32,7 @@ public final class DefinitionImpact {
             String upper = lower.rules().lessThan();
             boolean touched = lower.key().equals(definition.key()) || definition.key().equals(upper);
             if (upper != null && touched && next.definitions().containsKey(upper)) {
-                checkOrder(next, definition.key(), lower.key(), upper, errors);
+                checkOrder(current, next, definition.key(), lower.key(), upper, errors);
             }
         }
         return errors;
@@ -56,10 +56,17 @@ public final class DefinitionImpact {
         }
     }
 
-    private static void checkOrder(Snapshot next, String changedKey, String lower, String upper,
+    // like ChangeSetValidator, a place whose pair this change leaves as it was is not blamed for an older problem
+    private static void checkOrder(Snapshot current, Snapshot next, String changedKey, String lower, String upper,
                                    List<ValidationError> errors) {
         String rule = lower + " must be less than " + upper;
-        if (!isLess(next.definitions().get(lower).defaultValue(), next.definitions().get(upper).defaultValue())) {
+        boolean bothKnownBefore = current.definitions().containsKey(lower) && current.definitions().containsKey(upper);
+        Object lowerDefault = next.definitions().get(lower).defaultValue();
+        Object upperDefault = next.definitions().get(upper).defaultValue();
+        boolean defaultsChanged = !bothKnownBefore
+                || !lowerDefault.equals(current.definitions().get(lower).defaultValue())
+                || !upperDefault.equals(current.definitions().get(upper).defaultValue());
+        if (defaultsChanged && !isLess(lowerDefault, upperDefault)) {
             errors.add(new ValidationError(0, changedKey, "CROSS_FIELD_ORDER", rule + " at GLOBAL"));
         }
         for (String tenantId : next.tenantIds()) {
@@ -69,7 +76,12 @@ public final class DefinitionImpact {
                     continue;
                 }
                 ScopePath path = pathTo(tenantId, scope.getKey());
-                if (!isLess(next.resolve(tenantId, lower, path).value(), next.resolve(tenantId, upper, path).value())) {
+                Object value = next.resolve(tenantId, lower, path).value();
+                Object limit = next.resolve(tenantId, upper, path).value();
+                boolean changed = !bothKnownBefore
+                        || !value.equals(current.resolve(tenantId, lower, path).value())
+                        || !limit.equals(current.resolve(tenantId, upper, path).value());
+                if (changed && !isLess(value, limit)) {
                     errors.add(new ValidationError(0, changedKey, "CROSS_FIELD_ORDER",
                             rule + " at " + where(tenantId, scope.getKey())));
                 }

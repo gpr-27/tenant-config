@@ -129,6 +129,16 @@ class DefinitionWriteTest {
     }
 
     @Test
+    void lessThanBetweenADurationAndANumberIsRefused() throws Exception {
+        // booking.maxActive is a NUMBER: the order would never be enforced, so it is not accepted
+        define("ride.minDuration", "DURATION", "{\"lessThan\": \"booking.maxActive\"}", "\"PT30M\"")
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errors[0].code").value("INVALID_RULES"))
+                .andExpect(jsonPath("$.errors[0].message")
+                        .value("rules.lessThan must name a setting of the same type, NUMBER or DURATION"));
+    }
+
+    @Test
     void unknownTypeErrorNamesTheDefinitionKey() throws Exception {
         define("ride.colour", "COLOUR", "{}", "\"red\"")
                 .andExpect(status().isUnprocessableEntity())

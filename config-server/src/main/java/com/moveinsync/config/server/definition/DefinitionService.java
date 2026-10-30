@@ -23,6 +23,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -89,8 +90,11 @@ public class DefinitionService {
     // malformed rules, an unknown type or a default its own rules reject is refused before the write path
     private SettingDefinition parse(ObjectNode json, Map<String, SettingDefinition> existing) {
         String key = json.path("key").asText();
-        List<ValidationError> errors = RulesShape.check(key, json.path("type").asText(), json.get("rules"),
-                existing.keySet());
+        Map<String, String> typeByKey = new HashMap<>();
+        for (SettingDefinition definition : existing.values()) {
+            typeByKey.put(definition.key(), definition.type().name());
+        }
+        List<ValidationError> errors = RulesShape.check(key, json.path("type").asText(), json.get("rules"), typeByKey);
         if (!errors.isEmpty()) {
             throw refused(errors);
         }

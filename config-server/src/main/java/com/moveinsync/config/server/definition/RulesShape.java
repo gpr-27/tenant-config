@@ -8,7 +8,6 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 // Core reads rules as it finds them: "abc" as a NUMBER min becomes 0 and a DURATION min of 5 throws a parse
 // error mid-request. So the shape of every known rule is checked here, against the type, before core sees it.
@@ -18,14 +17,14 @@ final class RulesShape {
     private RulesShape() {
     }
 
-    static List<ValidationError> check(String key, String type, JsonNode rules, Set<String> definedKeys) {
+    static List<ValidationError> check(String key, String type, JsonNode rules, Map<String, String> typeByKey) {
         List<ValidationError> errors = new ArrayList<>();
         if (!rules.isObject()) {
             errors.add(invalid(key, "rules must be a JSON object"));
             return errors;
         }
         for (Map.Entry<String, JsonNode> rule : rules.properties()) {
-            String problem = problem(rule.getKey(), rule.getValue(), type, definedKeys);
+            String problem = problem(rule.getKey(), rule.getValue(), type, typeByKey);
             if (problem != null) {
                 errors.add(invalid(key, "rules." + rule.getKey() + " " + problem));
             }
@@ -34,7 +33,7 @@ final class RulesShape {
     }
 
     // null when the rule is fine; a rule name core does not know is left alone, core never reads it
-    private static String problem(String name, JsonNode value, String type, Set<String> definedKeys) {
+    private static String problem(String name, JsonNode value, String type, Map<String, String> typeByKey) {
         return switch (name) {
             case "min", "max" -> boundProblem(value, type);
             case "integerOnly", "allowOvernight" -> value.isBoolean() ? null : "must be true or false";
@@ -43,10 +42,19 @@ final class RulesShape {
                     ? null : "must be ENUM or STRING";
             case "maxItems" -> value.isIntegralNumber() && value.canConvertToInt() && value.intValue() > 0
                     ? null : "must be a positive whole number";
-            case "lessThan" -> value.isTextual() && definedKeys.contains(value.asText())
-                    ? null : "must name an existing setting";
+            case "lessThan" -> lessThanProblem(value, type, typeByKey);
             default -> null;
         };
+    }
+
+    // an order only means something between two NUMBERs or two DURATIONs; any other pair would never be enforced
+    private static String lessThanProblem(JsonNode value, String type, Map<String, String> typeByKey) {
+        if (!value.isTextual() || !typeByKey.containsKey(value.asText())) {
+            return "must name an existing setting";
+        }
+        boolean ordered = type.equals("NUMBER") || type.equals("DURATION");
+        boolean sameType = typeByKey.get(value.asText()).equals(type);
+        return ordered && sameType ? null : "must name a setting of the same type, NUMBER or DURATION";
     }
 
     // only NUMBER and DURATION read min and max

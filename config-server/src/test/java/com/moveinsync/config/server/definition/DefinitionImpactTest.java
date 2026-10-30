@@ -5,7 +5,9 @@ import com.moveinsync.config.core.change.ChangeKind;
 import com.moveinsync.config.core.change.ChangeSet;
 import com.moveinsync.config.core.change.OpKind;
 import com.moveinsync.config.core.change.Operation;
+import com.moveinsync.config.core.definition.SettingDefinition;
 import com.moveinsync.config.core.scope.ScopeKey;
+import com.moveinsync.config.core.snapshot.Snapshot;
 import com.moveinsync.config.server.DatabaseReset;
 import com.moveinsync.config.server.TestDatabase;
 import com.moveinsync.config.server.change.ChangeSetService;
@@ -101,6 +103,21 @@ class DefinitionImpactTest {
         set(ScopeKey.office("blr-ecospace"), "booking.cutoff", "PT3H");
 
         setDefault("booking.maxAdvance", "PT4H").andExpect(status().isOk());
+    }
+
+    @Test
+    void anOlderViolationIsNotBlamedOnAChangeThatLeavesItAlone() {
+        // apply() does not validate, so this stands for data written before the rule existed
+        ScopeKey hyd = ScopeKey.office("hyd-hitec");
+        Snapshot seeded = currentState.snapshot();
+        Snapshot legacy = seeded.apply(seeded.version() + 1, new ChangeSet("acme", "legacy", "before the rule",
+                List.of(new Operation(OpKind.SET, hyd, "booking.cutoff", TextNode.valueOf("PT10H")),
+                        new Operation(OpKind.SET, hyd, "booking.maxAdvance", TextNode.valueOf("PT2H")))));
+        SettingDefinition maxAdvance = legacy.definitions().get("booking.maxAdvance");
+        SettingDefinition reworded = new SettingDefinition(maxAdvance.key(), maxAdvance.type(), maxAdvance.rules(),
+                maxAdvance.defaultValue(), "reworded description");
+
+        assertThat(new DefinitionImpact(legacy).check(reworded)).isEmpty();
     }
 
     private void set(ScopeKey scope, String key, String value) {
