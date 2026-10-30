@@ -8,30 +8,29 @@ import com.moveinsync.config.core.change.DefinitionChanged;
 import com.moveinsync.config.core.change.Operation;
 import com.moveinsync.config.core.change.OverridesChanged;
 import com.moveinsync.config.core.definition.SettingDefinition;
-import com.moveinsync.config.core.error.InvalidValueException;
 import com.moveinsync.config.core.error.ValidationError;
 import com.moveinsync.config.core.error.ValidationException;
-import com.moveinsync.config.core.scope.ScopeKey;
-import com.moveinsync.config.core.snapshot.Snapshot;
 import com.moveinsync.config.server.definition.DefinitionEntity;
+import com.moveinsync.config.server.definition.DefinitionImpact;
 import com.moveinsync.config.server.definition.DefinitionRepository;
 import com.moveinsync.config.server.metrics.ServerMetrics;
 import com.moveinsync.config.server.push.PushHub;
 import com.moveinsync.config.server.state.CurrentState;
 import com.moveinsync.config.server.state.RecentChanges;
+import com.moveinsync.config.server.state.StateLoader;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 @Slf4j
 @Service
@@ -54,12 +53,17 @@ public class ChangeSetService {
     private final RecentChanges recentChanges;
     private final PushHub pushHub;
     private final ServerMetrics metrics;
+    private final Rejections rejections;
+    // a provider, because StateLoader itself reaches this service through DefinitionService.seed
+    private final ObjectProvider<StateLoader> stateLoader;
 
     public long submit(ChangeSet changeSet, ChangeKind kind, String idempotencyKey) {
         writeLock.lock();
         try {
+            stateLoader.getObject().catchUp();
             String requestHash = idempotencyKey == null ? null : idempotency.requestHash(changeSet);
-            Optional<Long> earlier = idempotency.previousVersion(changeSet.tenantId(), idempotencyKey, requestHash);
+            Optional<Long> earlier =
+                    idempotency.previousVersion(changeSet.tenantId(), kind, idempotencyKey, requestHash);
             if (earlier.isPresent()) {
                 return earlier.get();
             }
@@ -86,7 +90,12 @@ public class ChangeSetService {
     public long submitDefinition(SettingDefinition definition, String author, String reason) {
         writeLock.lock();
         try {
-            rejectBrokenOverrides(definition);
+            stateLoader.getObject().catchUp();
+            List<ValidationError> errors = new DefinitionImpact(currentState.snapshot()).check(definition);
+            if (!errors.isEmpty()) {
+                rejections.invalid(ChangeKind.DEFINITION, "*", errors);
+                throw new ValidationException(errors);
+            }
             Instant now = now();
             long version = commit(() -> {
                 long allocated = changes.appendDefinition(definition, author, reason, now);
@@ -102,38 +111,22 @@ public class ChangeSetService {
         }
     }
 
+    // for a caller whose read of the current state must not go stale before its submit (the lock is reentrant)
+    public <T> T underWriteLock(Supplier<T> work) {
+        writeLock.lock();
+        try {
+            return work.get();
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
     private List<Operation> validate(ChangeSet changeSet, ChangeKind kind) {
         try {
             return new ChangeSetValidator(currentState.snapshot()).validate(changeSet);
         } catch (ValidationException e) {
-            reject(kind, changeSet.tenantId(), e);
+            rejections.invalid(kind, changeSet.tenantId(), e.errors());
             throw e;
-        }
-    }
-
-    // migrating live values to new rules is out of scope, so a rule change that would strand one is refused
-    private void rejectBrokenOverrides(SettingDefinition definition) {
-        Snapshot snapshot = currentState.snapshot();
-        List<ValidationError> errors = new ArrayList<>();
-        for (String tenantId : snapshot.tenantIds()) {
-            for (Map.Entry<ScopeKey, Map<String, Object>> scope : snapshot.tenantOverrides(tenantId).entrySet()) {
-                Object value = scope.getValue().get(definition.key());
-                if (value == null) {
-                    continue;
-                }
-                try {
-                    definition.type().validate(value, definition.rules());
-                } catch (InvalidValueException e) {
-                    String where = tenantId + "/" + scope.getKey().level() + "/" + scope.getKey().id();
-                    errors.add(new ValidationError(0, definition.key(), e.errorCode(),
-                            "existing override at " + where + " would break: " + e.getMessage()));
-                }
-            }
-        }
-        if (!errors.isEmpty()) {
-            ValidationException rejected = new ValidationException(errors);
-            reject(ChangeKind.DEFINITION, "*", rejected);
-            throw rejected;
         }
     }
 
@@ -151,15 +144,6 @@ public class ChangeSetService {
         pushHub.publish(event);
         metrics.changeAccepted(event.kind());
         log.info("change set committed version={} kind={}", event.version(), event.kind());
-    }
-
-    private void reject(ChangeKind kind, String tenantId, ValidationException e) {
-        metrics.changeRejected(kind, e.errors());
-        List<String> codes = new ArrayList<>();
-        for (ValidationError error : e.errors()) {
-            codes.add(error.code());
-        }
-        log.warn("change set rejected tenant={} kind={} errors={}", tenantId, kind, codes);
     }
 
     // the column is timestamptz (microseconds); truncating keeps the pushed event equal to the stored row

@@ -42,6 +42,18 @@ public class StateLoader implements SmartInitializingSingleton {
         load();
     }
 
+    // A commit can succeed in the database while its acknowledgement is lost, leaving memory behind. The next
+    // write would rewind the sequence to that stale version and collide with the stored row, so reload first.
+    // Called by ChangeSetService under its write lock.
+    public void catchUp() {
+        long stored = changes.maxVersion();
+        long inMemory = currentState.snapshot().version();
+        if (stored > inMemory) {
+            log.warn("database is at version={} but memory at version={}, reloading state", stored, inMemory);
+            load();
+        }
+    }
+
     public void load() {
         Map<String, SettingDefinition> byKey = new HashMap<>();
         for (DefinitionEntity entity : definitions.findAll()) {

@@ -23,7 +23,9 @@ import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -46,6 +48,10 @@ class ChangeSetTransactionTest {
 
     @Autowired
     ChangeSetService changeSets;
+    @Autowired
+    ChangeRepository changes;
+    @Autowired
+    TransactionTemplate tx;
     @Autowired
     CurrentState currentState;
     @Autowired
@@ -104,6 +110,27 @@ class ChangeSetTransactionTest {
         Mockito.reset(overrides);
 
         assertThat(changeSets.submit(changeSet, ChangeKind.CHANGE, null)).isEqualTo(before + 1);
+    }
+
+    @Test
+    void commitWhoseAcknowledgementWasLostDoesNotJamTheNextWrite() {
+        long before = currentState.snapshot().version();
+        // committed in the database, but the caller never heard back, so memory was not updated
+        ChangeSet lost = new ChangeSet("acme", "acme-ops", "ack lost", List.of(cutoff("blr-ecospace", "PT30M")));
+        long lostVersion = tx.execute(status -> {
+            long version = changes.append(lost, ChangeKind.CHANGE, null, null, Instant.now());
+            overrides.applyAll("acme", lost.operations(), version);
+            return version;
+        });
+        assertThat(lostVersion).isEqualTo(before + 1);
+        assertThat(currentState.snapshot().version()).isEqualTo(before);
+
+        ChangeSet next = new ChangeSet("acme", "acme-ops", "next", List.of(cutoff("hyd-hitec", "PT45M")));
+
+        assertThat(changeSets.submit(next, ChangeKind.CHANGE, null)).isEqualTo(lostVersion + 1);
+        assertThat(currentState.snapshot().version()).isEqualTo(lostVersion + 1);
+        assertThat(currentState.snapshot().tenantOverrides("acme"))
+                .containsKeys(ScopeKey.office("blr-ecospace"), ScopeKey.office("hyd-hitec"));
     }
 
     private long logRows() {
