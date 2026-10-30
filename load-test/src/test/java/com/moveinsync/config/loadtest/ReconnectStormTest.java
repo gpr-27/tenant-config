@@ -113,7 +113,7 @@ class ReconnectStormTest {
         long target = submit("PT41M");
         // a restarted process starts with empty memory and reloads values, version and ring from the database
         currentState.replace(Snapshot.empty());
-        recentChanges.clear();
+        recentChanges.replaceAll(List.of());
         stateLoader.load();
 
         Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();

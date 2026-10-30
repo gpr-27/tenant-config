@@ -70,18 +70,16 @@ public class StateLoader implements SmartInitializingSingleton {
         }
 
         long version = changes.maxVersion();
-        currentState.replace(Snapshot.of(version, byKey, values));
-
-        List<ChangeEvent> newestFirst = new ArrayList<>();
+        List<ChangeEvent> recent = new ArrayList<>();
         for (ChangeEntity change : changes.findByOrderByVersionDesc(Pageable.ofSize(recentChanges.capacity()))) {
-            newestFirst.add(change.toEvent());
+            recent.add(change.toEvent());
         }
-        Collections.reverse(newestFirst);
-        recentChanges.clear();
-        for (ChangeEvent event : newestFirst) {
-            recentChanges.add(event);
-        }
-        log.info("state loaded version={} definitions={} recentChanges={}", version, byKey.size(), newestFirst.size());
+        Collections.reverse(recent);
+
+        // ring first: a reader that sees the new version must also find its events in the ring
+        recentChanges.replaceAll(recent);
+        currentState.replace(Snapshot.of(version, byKey, values));
+        log.info("state loaded version={} definitions={} recentChanges={}", version, byKey.size(), recent.size());
 
         if (byKey.isEmpty()) {
             definitionService.seed();

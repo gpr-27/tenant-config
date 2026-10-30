@@ -50,7 +50,10 @@ public class RecentChanges {
         return capacity;
     }
 
-    public synchronized void clear() {
+    // one step, so a reader never sees the ring empty halfway through a reload and concludes it missed nothing
+    public synchronized void replaceAll(List<ChangeEvent> oldestFirst) {
         events.clear();
+        int skip = Math.max(0, oldestFirst.size() - capacity);
+        events.addAll(oldestFirst.subList(skip, oldestFirst.size()));
     }
 }

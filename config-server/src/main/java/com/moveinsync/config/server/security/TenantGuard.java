@@ -8,9 +8,10 @@ public final class TenantGuard {
     private TenantGuard() {
     }
 
-    // 404 rather than 403, so a caller cannot learn that another tenant exists
+    // 404 rather than 403, so a caller cannot learn that another tenant exists.
+    // "*" is where definition changes are logged, not a tenant: not even an ADMIN may roll it back or promote it.
     public static void check(Authentication auth, String tenantId) {
-        if (!seesAllTenants(auth) && !tenantId.equals(tenantOf(auth))) {
+        if (tenantId.equals("*") || (!seesAllTenants(auth) && !tenantId.equals(tenantOf(auth)))) {
             throw new TenantAccessDeniedException();
         }
     }

@@ -8,7 +8,9 @@ import com.moveinsync.config.core.change.Operation;
 import com.moveinsync.config.core.scope.ScopeKey;
 import com.moveinsync.config.server.DatabaseReset;
 import com.moveinsync.config.server.TestDatabase;
+import com.moveinsync.config.server.change.ChangeRepository;
 import com.moveinsync.config.server.change.ChangeSetService;
+import com.moveinsync.config.server.change.OverrideRepository;
 import com.moveinsync.config.server.security.JwtService;
 import com.moveinsync.config.server.security.Role;
 import com.moveinsync.config.server.state.CurrentState;
@@ -23,7 +25,9 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,6 +55,12 @@ class RollbackTest {
     JdbcTemplate jdbc;
     @Autowired
     StateLoader stateLoader;
+    @Autowired
+    ChangeRepository changes;
+    @Autowired
+    OverrideRepository overrides;
+    @Autowired
+    TransactionTemplate tx;
 
     long target;
     long latest;
@@ -73,6 +83,19 @@ class RollbackTest {
                           {"op": "UNSET", "level": "CLIENT", "scopeId": "acme", "key": "booking.maxAdvance"},
                           {"op": "SET", "level": "OFFICE", "scopeId": "blr-ecospace", "key": "booking.cutoff", "value": "PT30M"}
                         ]}""".formatted(target), true));
+
+        assertThat(currentState.snapshot().version()).isEqualTo(latest);
+    }
+
+    @Test
+    void omittedDryRunOnlyPreviewsAndWritesNothing() throws Exception {
+        mvc.perform(post("/api/v1/tenants/acme/rollback")
+                        .header("Authorization", "Bearer " + jwt.issue("acme-ops", Role.OPERATOR, "acme"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetVersion\": " + target + "}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.diff.length()").value(2))
+                .andExpect(jsonPath("$.version").doesNotExist());
 
         assertThat(currentState.snapshot().version()).isEqualTo(latest);
     }
@@ -106,6 +129,38 @@ class RollbackTest {
         rollback("acme", latest + 50, true)
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.errorCode").value("VERSION_NOT_FOUND"));
+    }
+
+    @Test
+    void definitionsPseudoTenantIsNotFoundEvenForAnAdmin() throws Exception {
+        mvc.perform(post("/api/v1/tenants/*/rollback")
+                        .header("Authorization", "Bearer " + jwt.issue("admin", Role.ADMIN, null))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetVersion\": " + target + ", \"dryRun\": true}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.errorCode").value("NOT_FOUND"));
+    }
+
+    @Test
+    void rollbackAfterALostCommitAckUndoesTheCommitMemoryNeverSaw() throws Exception {
+        // committed in the database, but the acknowledgement was lost, so memory still says `latest`
+        Operation lostOp = new Operation(OpKind.SET, ScopeKey.office("blr-ecospace"), "booking.cutoff",
+                TextNode.valueOf("PT50M"));
+        ChangeSet lost = new ChangeSet("acme", "acme-ops", "ack lost", List.of(lostOp));
+        long lostVersion = tx.execute(status -> {
+            long version = changes.append(lost, ChangeKind.CHANGE, null, null, Instant.now());
+            overrides.applyAll("acme", lost.operations(), version);
+            return version;
+        });
+        assertThat(currentState.snapshot().version()).isEqualTo(latest);
+
+        rollback("acme", latest, false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.diff.length()").value(1))
+                .andExpect(jsonPath("$.diff[0].value").value("PT45M"))
+                .andExpect(jsonPath("$.version").value(lostVersion + 1));
+
+        assertThat(currentState.snapshot().tenantOverrides("acme")).isEqualTo(replayer.stateAt("acme", latest));
     }
 
     private long set(String tenant, ScopeKey scope, String key, String value) {

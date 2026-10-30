@@ -115,6 +115,8 @@ public class ChangeSetService {
     public <T> T underWriteLock(Supplier<T> work) {
         writeLock.lock();
         try {
+            // the caller reads memory before it submits, so memory must already include a commit whose ack was lost
+            stateLoader.getObject().catchUp();
             return work.get();
         } finally {
             writeLock.unlock();
