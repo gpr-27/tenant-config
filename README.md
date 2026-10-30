@@ -105,17 +105,48 @@ The timer on this Mac ticks in roughly 41 ns steps, so the percentiles land on m
 
 | Reconnect storm, 500 clients, server restarted | time to all current | `config_change` selects |
 |---|---|---|
-| 2 changes committed while the streams were down | 2.0 s (3 runs: 1.9, 2.0, 2.0) | 0 statements, 0 queries |
+| 2 changes committed while the streams were down; server memory rebuilt from the database | 1.9 s worst of 3 runs (1.7, 1.0, 1.9) | 0 statements, 0 queries |
 
 | Writes (`hey -z 30s -c 20`, POST /changes) | req/s | p50 ms | p99 ms |
 |---|---|---|---|
 | 10,414 requests, all 201 | 346 | 38.3 | 358.8 |
 
-Propagation is measured from the moment the operator's `POST /changes` returns. About half the per-publish medians are negative: the push often reaches all 200 clients before the HTTP response reaches the operator, because publish happens inside the same call right after commit.
+Propagation is measured from the moment the operator's `POST /changes` returns. 8 of the 20 per-publish medians
+are negative: the push often reaches the clients before the HTTP response reaches the operator, because publish
+happens inside the same call right after commit.
+
+The write run sends no `Idempotency-Key`: `hey` repeats the same headers on every request, and one shared key
+would turn the run into one write plus 10,000 replays. So the number covers validate, commit, apply and publish,
+but not the idempotency lookup, which is one indexed select on `(tenant_id, idempotency_key)`.
 
 What these numbers do not show: everything ran on one host over loopback, so network latency and loss between
 server and clients are absent; Postgres ran in a VM on the same machine; no JVM or GC tuning beyond defaults; one
 server instance.
+
+## Cost: time, space and where it stops scaling
+
+| Operation | Time | Space | Measured |
+|---|---|---|---|
+| Read (`get`, `explain`) | O(1): at most four hash lookups (SHIFT, OFFICE, CLIENT, then the definition default) | none per read | 41 to 83 ns p50 |
+| Client snapshot | | O(definitions + overrides) for all tenants | 106 bytes per override; the 52,000-override benchmark snapshot is 5.5 MB |
+| Apply a change set (client and server) | O(k + m): k operations, m entries in the scope maps they touch; everything else is shared | O(m) new map entries | |
+| Validate a change set | O(k), plus one resolve per `lessThan` pair | O(k) | |
+| Publish | O(connections) enqueues; each connection's write happens on one of 8 stripes | one queued frame per connection | 200 clients: p50 0.4 ms, p99 26 ms |
+| Commit a change set | serialised: one at a time under the write lock | one log row + k override rows | 346 per second, about 2.9 ms each |
+| Reconnect catch-up | O(missed events), from the in-memory ring; O(state) for a full snapshot past the ring | ring holds 1,000 events | 500 clients current in 1.9 s, 0 queries |
+| Rollback | O(tenant history): replay of that tenant's log, then a diff | O(tenant state) | |
+
+Where it stops scaling, in the order I expect to hit it:
+
+1. **Snapshot size per service.** Every service holds every tenant. At 106 bytes per override, 1 million overrides
+   is about 100 MB in each of the 40 services, and a full snapshot of that size is slow to send after a long
+   outage. That is the trigger for per-tenant filtered subscriptions.
+2. **Connections per server.** One instance serves at most 2,000 SSE streams (the cap answers 503 above that). Each
+   stream holds a socket, and a slow client can delay the others on its stripe. Past that, a second instance with
+   Redis pub/sub for fan-out.
+3. **Writes.** The single writer does a few hundred commits per second. Operators make a few per minute, so this
+   is the last limit to matter.
+4. **Rollback by replay.** Grows with one tenant's history; milliseconds at operator rates for years.
 
 ## Architecture
 
@@ -184,6 +215,8 @@ tenant exists. A role that may not perform the action at all (an EMPLOYEE postin
 | Duplicate POST after a timeout | Same `Idempotency-Key` and body: the original version. Same key, other body: 409 | Without a key the retry becomes a second version with the same content |
 | Reconnect storm after a server restart | Clients serve their snapshot meanwhile | Full-jitter backoff spreads reconnects; each is served from the ring with no database query; above 2,000 connections the server answers 503 with `Retry-After: 5` |
 | PostgreSQL down | Writes and logins get 503 `STORAGE_UNAVAILABLE`; client reads, resolve, stream and heal poll keep working from memory | Writes succeed again once the database is back; no restart needed |
+| Commit succeeds in the database but its acknowledgement is lost | Operator sees an error; the server's memory is one version behind its own database | The next write notices the database is ahead, reloads state from it, then proceeds; clients catch up through the heal poll |
+| A definition change would break `cutoff < maxAdvance` somewhere | 422 `CROSS_FIELD_ORDER` naming the scope | Nothing written; the operator changes the overrides first or picks another value |
 
 ## Trade-offs
 
@@ -247,9 +280,12 @@ tenant exists. A role that may not perform the action at all (an EMPLOYEE postin
 | Visible within 5 s; lost push healed by poll | `PushEndToEndIT`, `MissedPushHealTest`, `PropagationBenchmark` |
 | Versions only move forward (41 after 43) | `VersionMonotonicityTest`, `FullSnapshotReplacesStateTest` |
 | Reconnect with jitter and delta | `BackoffTest`, `RecentChangesTest`, `ReconnectStormTest` |
-| Atomic change set, no mixed state | `AtomicSnapshotConcurrencyTest`, `SnapshotApplyTest`, `ChangeSetTransactionTest` |
+| Atomic change set, no mixed state; a lost commit acknowledgement does not jam writes | `AtomicSnapshotConcurrencyTest`, `SnapshotApplyTest`, `ChangeSetTransactionTest` |
 | Staged rollout and promote | `StagedRolloutTest` |
-| Rollback to any version with a diff | `RollbackTest` |
+| Rollback to any version with a diff | `RollbackTest`, `RollbackLockTest` |
+| A definition change cannot break `cutoff < maxAdvance` | `DefinitionImpactTest` |
+| Every refused write is logged and counted | `RejectionAccountingTest` |
+| Connection cap answers 503 with `Retry-After` | `PushHubTest`, `PushCapacityResponseTest` |
 | Server down: keep serving, start from disk | `ServerKillIT`, `DiskSnapshotColdStartTest` |
 | Roles and tenant isolation | `SecurityIT` |
 | Duplicate POST | `IdempotencyTest` |
@@ -289,6 +325,23 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 ```
 
 Postman: import `docs/postman/tenant-config.postman_collection.json`; variables `base`, `tenant`, `token`.
+
+## Monitoring: what to look at at 3 AM
+
+All metrics are on `/actuator/prometheus` (server on 8080, each embedding service on its own port). Logs are JSON
+with `requestId`, `tenantId` and `actor`; no request bodies and no personal data.
+
+| Question | Metric | Healthy |
+|---|---|---|
+| Is a service behind? (lag) | `config_client_lag_versions`, `config_client_lag_seconds` | 0 versions; seconds stays near 0 and climbs only while the server is unreachable |
+| Is the service still getting pushes? (retries) | `config_client_reconnects_total`, `config_client_gap_resync_total` | flat; a rising reconnect count means the stream keeps dropping |
+| Are duplicates or reordered pushes arriving? | `config_client_stale_events_total` | near 0 |
+| Are operators' changes being refused? (rejections) | `config_changes_total{result="rejected"}`, `config_validation_errors_total{code}` | spikes match a human mistake, not a trend |
+| Is the server failing requests? (error rate) | HTTP 5xx in `http_server_requests_seconds_count{status=~"5.."}`; WARN and ERROR log lines | 0 |
+| Is push falling behind? (queue depth) | `config_push_queue_depth`, `config_push_send_failures_total` | queue near 0 between changes |
+| How many services are connected? | `config_push_connections` | about one per embedding instance; far below the 2,000 cap |
+| Where is the server? | `config_server_version`, `config_recent_changes_size` | every client's `config_client_version` equals the server's within seconds |
+| Are reads fast? | `config_client_read_latency_seconds`, `config_resolve_latency_seconds` | sub-microsecond on clients |
 
 ## Caching
 

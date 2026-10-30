@@ -59,6 +59,7 @@ versions, but each one passes through the same versions in the same order and ne
 | Duplicate POST | Original version, or 409 if the body differs | Idempotency key per tenant |
 | Reconnect storm | Clients keep serving | Full-jitter backoff, ring replay with zero DB reads, 503 + `Retry-After` above 2,000 connections |
 | PostgreSQL down | Writes and logins 503 | Reads unaffected; writes resume when it returns |
+| Commit acknowledgement lost | Operator sees an error; server memory one version behind | Next write reloads state from the database first |
 
 ## Trade-offs
 

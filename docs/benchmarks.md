@@ -122,14 +122,18 @@ mvn -B -pl load-test -am verify -Pit -Dit.test=ReconnectStormTest -Dtest=none \
 
 | Clients | Time to all current | `config_change` selects |
 |---|---|---|
-| 500 | 2.0 s (measured runs: 1,889 ms and 2,001 ms) | 0 Hibernate statements, 0 queries |
+| 500 | 1.9 s worst of 3 runs (1,734 / 984 / 1,898 ms) | 0 Hibernate statements, 0 queries |
 
-The test restarts the embedded Tomcat, which drops all 500 SSE streams, commits two change sets while they are
-down, and then measures from the restart until the last client reports the current version. Hibernate statistics
-are read before and after the catch-up; every client was served from the in-memory ring.
+The test stops the embedded Tomcat, which drops all 500 SSE streams, and commits two change sets while they are
+down. It then empties the server's memory and rebuilds it from the database the way a fresh process does
+(values, latest version and the last 1,000 log rows), restarts Tomcat, and measures until the last client reports
+the current version. Hibernate statistics are read after the rebuild and again after the catch-up; every client was
+served from the rebuilt in-memory ring.
 
 ```
-reconnect storm: 500 clients current 2001 ms after restart; 0 SQL statements, 0 queries
+reconnect storm: 500 clients current 1734 ms after restart; 0 SQL statements, 0 queries
+reconnect storm: 500 clients current 984 ms after restart; 0 SQL statements, 0 queries
+reconnect storm: 500 clients current 1898 ms after restart; 0 SQL statements, 0 queries
 ```
 
 ## 4. Server kill

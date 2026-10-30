@@ -1,13 +1,16 @@
 {
   "info": {
     "name": "tenant-config",
-    "description": "Config server API. Run 'Login as acme-ops' first; it stores the token in the collection variable.",
+    "description": "Config server API. Run 'Login as acme-ops' first; it stores the token in the collection variable. 'Stage to two offices' stores its version in stagedVersion, which 'Promote' uses. Each change request stores its version in lastVersion. The rollback requests target rollbackTarget, default 9: on a fresh database versions 1-8 are the seeded definitions, so 9 is the first operator change. Set it to any version from the change log (or to lastVersion) to roll back elsewhere.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "base", "value": "http://localhost:8080" },
     { "key": "token", "value": "" },
-    { "key": "tenant", "value": "acme" }
+    { "key": "tenant", "value": "acme" },
+    { "key": "stagedVersion", "value": "" },
+    { "key": "lastVersion", "value": "" },
+    { "key": "rollbackTarget", "value": "9" }
   ],
   "auth": {
     "type": "bearer",
@@ -90,6 +93,9 @@
       "item": [
         {
           "name": "Set booking.cutoff = PT30M at OFFICE blr-ecospace",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('lastVersion', pm.response.json().version);"
+          ] } } ],
           "request": {
             "method": "POST",
             "header": [
@@ -120,6 +126,9 @@
         },
         {
           "name": "Atomic two-key change: cutoff + maxAdvance",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('lastVersion', pm.response.json().version);"
+          ] } } ],
           "request": {
             "method": "POST",
             "header": [ { "key": "Content-Type", "value": "application/json" } ],
@@ -133,6 +142,9 @@
         },
         {
           "name": "Delete override (UNSET)",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('lastVersion', pm.response.json().version);"
+          ] } } ],
           "request": { "method": "DELETE", "url": "{{base}}/api/v1/tenants/{{tenant}}/overrides/OFFICE/blr-ecospace/booking.cutoff" }
         }
       ]
@@ -142,6 +154,9 @@
       "item": [
         {
           "name": "Stage to two offices",
+          "event": [ { "listen": "test", "script": { "exec": [
+            "pm.collectionVariables.set('stagedVersion', pm.response.json().version);"
+          ] } } ],
           "request": {
             "method": "POST",
             "header": [ { "key": "Content-Type", "value": "application/json" } ],
@@ -151,7 +166,7 @@
         },
         {
           "name": "Promote staged version to CLIENT",
-          "request": { "method": "POST", "url": "{{base}}/api/v1/tenants/{{tenant}}/changes/3/promote" }
+          "request": { "method": "POST", "url": "{{base}}/api/v1/tenants/{{tenant}}/changes/{{stagedVersion}}/promote" }
         },
         {
           "name": "Rollback dry run",
@@ -159,7 +174,7 @@
             "method": "POST",
             "header": [ { "key": "Content-Type", "value": "application/json" } ],
             "url": "{{base}}/api/v1/tenants/{{tenant}}/rollback",
-            "body": { "mode": "raw", "raw": "{\"targetVersion\":1,\"dryRun\":true}" }
+            "body": { "mode": "raw", "raw": "{\"targetVersion\":{{rollbackTarget}},\"dryRun\":true}" }
           }
         },
         {
@@ -168,7 +183,7 @@
             "method": "POST",
             "header": [ { "key": "Content-Type", "value": "application/json" } ],
             "url": "{{base}}/api/v1/tenants/{{tenant}}/rollback",
-            "body": { "mode": "raw", "raw": "{\"targetVersion\":1,\"dryRun\":false}" }
+            "body": { "mode": "raw", "raw": "{\"targetVersion\":{{rollbackTarget}},\"dryRun\":false}" }
           }
         }
       ]
