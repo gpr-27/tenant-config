@@ -12,7 +12,7 @@ All numbers below are from one machine on one day; the commands reproduce them.
 | JDK | OpenJDK 21.0.13 (Homebrew) |
 | Docker | Colima, 4 CPU / 6 GB VM |
 | Date | 2026-10-30 |
-| Commit | working tree of 2026-10-30, before the first commit |
+| Commit | reads: working tree before the first commit (the read path has not changed since); propagation, writes and the reconnect storm: `dbb52ae` |
 
 Before any run:
 
@@ -78,36 +78,38 @@ BASE=http://localhost:8080 java -cp load-test/target/benchmarks.jar com.moveinsy
 
 | Clients | Publishes | p50 ms | p99 ms | max ms |
 |---|---|---|---|---|
-| 200 | 20 | 0.42 | 26.0 | 32.0 |
+| 200 | 20 | 0.99 | 6.9 | 7.9 |
 
-The max and the p99 both come from the first publish (JIT warm-up on server and clients); publishes 2 to 20 all completed under 15 ms. Negative values mean the listener fired before the operator's POST returned.
+5 of the 20 per-publish medians are negative: the listener fired before the operator's POST returned, because the
+server publishes inside the same call right after commit. An earlier run on a busier machine (a Docker build in
+parallel) gave p50 0.42, p99 26 and max 32 ms, all of the tail on the first, cold publish.
 
 Raw output:
 
 ```
 | publish | version | p50 ms | p99 ms | max ms |
 |---:|---:|---:|---:|---:|
-| 1 | 9 | 18.49 | 31.40 | 31.95 |
-| 2 | 10 | 3.68 | 11.70 | 11.79 |
-| 3 | 11 | 1.62 | 4.43 | 4.49 |
-| 4 | 12 | 3.86 | 8.29 | 8.33 |
-| 5 | 13 | -0.39 | 1.53 | 1.57 |
-| 6 | 14 | 2.54 | 10.51 | 10.54 |
-| 7 | 15 | -9.67 | 1.88 | 2.07 |
-| 8 | 16 | 5.22 | 14.48 | 14.67 |
-| 9 | 17 | -0.05 | 6.37 | 6.45 |
-| 10 | 18 | -2.66 | 2.11 | 2.14 |
-| 11 | 19 | -5.77 | -0.91 | -0.90 |
-| 12 | 20 | 3.65 | 8.68 | 8.70 |
-| 13 | 21 | 5.58 | 14.94 | 14.95 |
-| 14 | 22 | -13.20 | -1.61 | -1.59 |
-| 15 | 23 | -6.57 | 0.82 | 0.92 |
-| 16 | 24 | 1.07 | 8.33 | 8.35 |
-| 17 | 25 | 3.74 | 5.85 | 5.89 |
-| 18 | 26 | -2.42 | 2.47 | 2.50 |
-| 19 | 27 | 3.00 | 6.24 | 6.29 |
-| 20 | 28 | -0.53 | 1.75 | 1.75 |
-| all |  | 0.42 | 26.03 | 31.95 |
+| 1 | 32546 | 0.76 | 5.99 | 6.07 |
+| 2 | 32547 | 3.51 | 6.50 | 6.57 |
+| 3 | 32548 | -1.46 | 1.23 | 1.32 |
+| 4 | 32549 | 5.25 | 7.72 | 7.90 |
+| 5 | 32550 | -1.64 | 1.98 | 1.99 |
+| 6 | 32551 | 0.73 | 5.27 | 5.29 |
+| 7 | 32552 | 0.35 | 4.71 | 4.73 |
+| 8 | 32553 | 0.53 | 2.92 | 2.95 |
+| 9 | 32554 | 2.19 | 4.46 | 4.67 |
+| 10 | 32555 | 0.98 | 4.44 | 4.44 |
+| 11 | 32556 | 0.88 | 3.58 | 3.59 |
+| 12 | 32557 | 3.62 | 5.29 | 5.31 |
+| 13 | 32558 | 3.01 | 6.92 | 6.97 |
+| 14 | 32559 | -0.64 | 1.56 | 1.94 |
+| 15 | 32560 | 1.06 | 3.38 | 3.38 |
+| 16 | 32561 | 2.39 | 6.40 | 6.49 |
+| 17 | 32562 | -0.43 | 2.10 | 2.17 |
+| 18 | 32563 | -0.63 | 1.77 | 1.79 |
+| 19 | 32564 | 1.64 | 2.94 | 2.94 |
+| 20 | 32565 | 3.87 | 4.95 | 4.98 |
+| all |  | 0.99 | 6.88 | 7.90 |
 ```
 
 ## 3. Reconnect storm
@@ -122,7 +124,7 @@ mvn -B -pl load-test -am verify -Pit -Dit.test=ReconnectStormTest -Dtest=none \
 
 | Clients | Time to all current | `config_change` selects |
 |---|---|---|
-| 500 | 1.9 s worst of 3 runs (1,734 / 984 / 1,898 ms) | 0 Hibernate statements, 0 queries |
+| 500 | 1.9 s worst of 3 runs (1,734 / 984 / 1,898 ms); 1.7 to 1.9 s again in later full builds | 0 Hibernate statements, 0 queries |
 
 The test stops the embedded Tomcat, which drops all 500 SSE streams, and commits two change sets while they are
 down. It then empties the server's memory and rebuilds it from the database the way a fresh process does
@@ -168,33 +170,31 @@ load-test/scripts/bench-writes.sh
 
 | req/s | p50 ms | p99 ms | Non-2xx |
 |---|---|---|---|
-| 346 | 38.3 | 358.8 | 0 (10,414 requests, all 201) |
+| 1,084 | 13.5 | 71.5 | 0 (32,537 requests, all 201) |
 
 Every request is a real commit (log row + override upsert + push to the one connected demo client), taken under
-the single write lock, so this is the serialised write path at full tilt: about 2.9 ms per change set end to end.
-Operators make a few changes a minute.
+the single write lock, so this is the serialised write path at full tilt: under 1 ms of lock time per change set.
+Operators make a few changes a minute. An earlier run on a busier machine gave 346 req/s, p50 38 ms, p99 359 ms.
 
 Raw output:
 
 ```
 Summary:
-  Total:        30.0633 secs
-  Slowest:      1.3461 secs
-  Fastest:      0.0097 secs
-  Average:      0.0577 secs
-  Requests/sec: 346.4028
-
+  Total: 30.0094 secs
+  Slowest: 0.1959 secs
+  Fastest: 0.0084 secs
+  Average: 0.0184 secs
+  Requests/sec: 1084.2261
 Latency distribution:
-  10% in 0.0129 secs
-  25% in 0.0200 secs
-  50% in 0.0383 secs
-  75% in 0.0695 secs
-  90% in 0.1143 secs
-  95% in 0.1452 secs
-  99% in 0.3588 secs
-
+  10% in 0.0109 secs
+  25% in 0.0114 secs
+  50% in 0.0135 secs
+  75% in 0.0198 secs
+  90% in 0.0317 secs
+  95% in 0.0431 secs
+  99% in 0.0715 secs
 Status code distribution:
-  [201] 10414 responses
+  [201] 32537 responses
 ```
 
 ## What these numbers do not show

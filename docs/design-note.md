@@ -25,7 +25,7 @@ to disk so it can start while the server is down.
 
 Source: [diagrams/sequence-publish.mmd](diagrams/sequence-publish.mmd)
 
-1. The operator posts a change; `TenantGuard` checks role and tenant.
+1. The operator posts a change; `@PreAuthorize` checks the role and `TenantGuard` checks the tenant.
 2. `ChangeSetService.submit` takes the write lock and validates every operation against the current snapshot.
 3. In one transaction it inserts the `config_change` row. **The version is assigned here**, by the database
    sequence, inside the lock. The override rows are upserted and the transaction commits.
@@ -60,6 +60,8 @@ versions, but each one passes through the same versions in the same order and ne
 | Reconnect storm | Clients keep serving | Full-jitter backoff, ring replay with zero DB reads, 503 + `Retry-After` above 2,000 connections |
 | PostgreSQL down | Writes and logins 503 | Reads unaffected; writes resume when it returns |
 | Commit acknowledgement lost | Operator sees an error; server memory one version behind | Next write reloads state from the database first |
+| Definition change would break `cutoff < maxAdvance` | 422 `CROSS_FIELD_ORDER` naming the scope | Nothing written; change the overrides first |
+| Promote of a staged change that newer changes overtook | 409 `STAGED_CHANGE_SUPERSEDED` | Nothing written; stage again |
 
 ## Trade-offs
 
@@ -81,7 +83,10 @@ OAuth2/SSO, secrets management, dashboards, Kubernetes, WebFlux. The README list
 
 Office and shift ids are unique within a tenant. Shift-to-office membership is not modelled, so a cross-field check
 on a SHIFT value does not see an OFFICE-level partner. A rollback that would restore a value the current rules
-reject fails with 422 instead of succeeding. The embedded client authenticates as SERVICE and sees every tenant.
+reject fails with 422 instead of succeeding, and a rollback request without `"dryRun": false` is only a preview. The
+embedded client authenticates as SERVICE and sees every tenant. `config_client_lag_seconds` is the time since the
+server last proved alive (a heartbeat every 15 s), so it stays under 15 s while connected. A restored database is
+noticed when its version falls below a client's, and the client then takes the server's full snapshot.
 
 ## Why not the obvious way
 

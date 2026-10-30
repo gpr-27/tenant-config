@@ -44,7 +44,9 @@ curl -s "localhost:8081/bookings/can-book?tenantId=acme&officeId=blr-ecospace&de
 # after the change:  {"allowed":true,"cutoff":"PT30M","configVersion":9}
 ```
 
-Use `officeId=hyd-hitec` to see an office without an override fall back to the 60 min default. In the first second or two after start, before the demo has pulled its first snapshot, `can-book` answers 503 with the problem detail `configuration not loaded yet`, and the demo's `/actuator/health` stays DOWN until then. Metrics are on
+Use `officeId=hyd-hitec` to see an office without an override fall back to the 60 min default. Until the demo has
+its first snapshot (a few seconds after the config server is up), `can-book` answers 503 with the problem detail
+`configuration not loaded yet`, and the demo's `/actuator/health` stays DOWN. Metrics are on
 `localhost:8080/actuator/prometheus` (server: `config_server_version`, `config_push_connections`,
 `config_changes_total`, ...) and `localhost:8081/actuator/prometheus` (client: `config_client_version`,
 `config_client_lag_versions`, `config_client_reconnects_total`, `config_client_read_latency_seconds`, ...).
@@ -62,7 +64,8 @@ not at all. Clients are eventually consistent with a bounded lag: at most 5 s wh
 30 s when a push is lost (the heal poll notices), and unbounded while the server cannot be reached, which is when
 the client keeps serving the last version it has and the reconnect and lag metrics show how far behind it may be.
 Two clients can be at different versions at the same moment, but every client walks through the same versions in
-the same order and never moves backwards.
+the same order and never moves backwards, with one exception: if the server's database is restored to an older
+version, clients follow it back, because the server is the truth.
 
 ### b. A client at version 43 receives version 41
 
@@ -89,7 +92,8 @@ Test: `VersionMonotonicityTest.eventWithVersion41After43IsDropped` (plus `duplic
 ### d. Benchmarks
 
 Machine: Apple M3, 8 cores, 16 GB, macOS 27.0.1, OpenJDK 21.0.13 (Homebrew), Docker via Colima (4 CPU / 6 GB VM),
-run on 2026-10-30. Commands and raw output: [docs/benchmarks.md](docs/benchmarks.md).
+run on 2026-10-30. Write and propagation numbers are from commit `dbb52ae`. Commands and raw output:
+[docs/benchmarks.md](docs/benchmarks.md).
 
 | Read (JMH, 50 tenants x 40 offices x 25 keys) | p50 ns | p99 ns | p99.9 ns | ops/s |
 |---|---|---|---|---|
@@ -101,7 +105,7 @@ The timer on this Mac ticks in roughly 41 ns steps, so the percentiles land on m
 
 | Propagation, 200 clients, 20 publishes | p50 ms | p99 ms | max ms |
 |---|---|---|---|
-| POST return to listener fired | 0.42 | 26.0 | 32.0 (first publish, cold JIT; every later publish stayed under 15 ms) |
+| POST return to listener fired | 0.99 | 6.9 | 7.9 |
 
 | Reconnect storm, 500 clients, server restarted | time to all current | `config_change` selects |
 |---|---|---|
@@ -109,14 +113,14 @@ The timer on this Mac ticks in roughly 41 ns steps, so the percentiles land on m
 
 | Writes (`hey -z 30s -c 20`, POST /changes) | req/s | p50 ms | p99 ms |
 |---|---|---|---|
-| 10,414 requests, all 201 | 346 | 38.3 | 358.8 |
+| 32,537 requests, all 201 | 1,084 | 13.5 | 71.5 |
 
-Propagation is measured from the moment the operator's `POST /changes` returns. 8 of the 20 per-publish medians
+Propagation is measured from the moment the operator's `POST /changes` returns. 5 of the 20 per-publish medians
 are negative: the push often reaches the clients before the HTTP response reaches the operator, because publish
 happens inside the same call right after commit.
 
 The write run sends no `Idempotency-Key`: `hey` repeats the same headers on every request, and one shared key
-would turn the run into one write plus 10,000 replays. So the number covers validate, commit, apply and publish,
+would turn the run into one write plus 30,000 replays. So the number covers validate, commit, apply and publish,
 but not the idempotency lookup, which is one indexed select on `(tenant_id, idempotency_key)`.
 
 What these numbers do not show: everything ran on one host over loopback, so network latency and loss between
@@ -130,9 +134,9 @@ server instance.
 | Read (`get`, `explain`) | O(1): at most four hash lookups (SHIFT, OFFICE, CLIENT, then the definition default) | none per read | 41 to 83 ns p50 |
 | Client snapshot | | O(definitions + overrides) for all tenants | 106 bytes per override; the 52,000-override benchmark snapshot is 5.5 MB |
 | Apply a change set (client and server) | O(k + m): k operations, m entries in the scope maps they touch; everything else is shared | O(m) new map entries | |
-| Validate a change set | O(k), plus one resolve per `lessThan` pair | O(k) | |
-| Publish | O(connections) enqueues; each connection's write happens on one of 8 stripes | one queued frame per connection | 200 clients: p50 0.4 ms, p99 26 ms |
-| Commit a change set | serialised: one at a time under the write lock | one log row + k override rows | 346 per second, about 2.9 ms each |
+| Validate a change set | O(k + m) for a trial apply, plus four resolves per scope of the tenant for each `lessThan` pair the change touches | O(k + m) | |
+| Publish | O(connections) enqueues; each connection's write happens on one of 8 stripes | one queued frame per connection | 200 clients: p50 1.0 ms, p99 6.9 ms |
+| Commit a change set | serialised: one at a time under the write lock | one log row + k override rows | 1,084 per second, under 1 ms each of lock time |
 | Reconnect catch-up | O(missed events), from the in-memory ring; O(state) for a full snapshot past the ring | ring holds 1,000 events | 500 clients current in 1.9 s, 0 queries |
 | Rollback | O(tenant history): replay of that tenant's log, then a diff | O(tenant state) | |
 
@@ -166,7 +170,9 @@ Source: [docs/diagrams/architecture.mmd](docs/diagrams/architecture.mmd). Design
 
 ## API
 
-All paths under `/api/v1`. Errors are RFC 7807 problem details with `errorCode`, `requestId` and, for 422, `errors[]`.
+All paths under `/api/v1`. Errors are RFC 7807 problem details with `errorCode` and `requestId`. A 422 adds
+`errors[]` of `{operationIndex, key, code, message}`; a 400 for a malformed request adds `errors[]` of
+`{field, code, message}` naming the field and the broken constraint. No error repeats a submitted value.
 
 | Method and path | Role | Body / params -> response |
 |---|---|---|
@@ -174,10 +180,10 @@ All paths under `/api/v1`. Errors are RFC 7807 problem details with `errorCode`,
 | `GET /definitions` | any | -> list of `{key, type, rules, default, description}` |
 | `POST /definitions` | ADMIN | `{key, type, rules, default, description}` -> 201 `{version}` |
 | `PUT /definitions/{key}` | ADMIN | `{rules?, default?, description?}` -> `{version}` |
-| `POST /tenants/{t}/changes` | OPERATOR, ADMIN | `{reason, operations:[{op, level, scopeId, key, value}]}`, optional `Idempotency-Key` header -> 201 `{version}` |
-| `POST /tenants/{t}/changes/staged` | OPERATOR, ADMIN | `{reason, targetOffices[], operations:[{key, value}]}` -> 201 `{version, offices}` |
+| `POST /tenants/{t}/changes` | OPERATOR, ADMIN | `{reason (max 500), operations:[{op, level, scopeId, key, value}]}`, optional `Idempotency-Key` header -> 201 `{version}` |
+| `POST /tenants/{t}/changes/staged` | OPERATOR, ADMIN | `{reason (max 500), targetOffices[], operations:[{key, value}]}` -> 201 `{version, offices}` |
 | `POST /tenants/{t}/changes/{v}/promote` | OPERATOR, ADMIN | -> 201 `{version}` |
-| `GET /tenants/{t}/changes?since&limit` | OPERATOR, ADMIN | -> `[{version, author, reason, kind, createdAt, operations}]` |
+| `GET /tenants/{t}/changes?since&limit` | OPERATOR, ADMIN | `limit` 1 to 1000, default 50 -> `[{version, author, reason, kind, createdAt, operations}]` |
 | `DELETE /tenants/{t}/overrides/{level}/{scopeId}/{key}` | OPERATOR, ADMIN | -> `{version}` |
 | `POST /tenants/{t}/rollback` | OPERATOR, ADMIN | `{targetVersion, dryRun}` -> `{targetVersion, diff, version?}` |
 | `GET /tenants/{t}/resolve?key&officeId&shiftId&explain` | any, own tenant | -> `{key, value, source?, version?}` |
@@ -186,8 +192,8 @@ All paths under `/api/v1`. Errors are RFC 7807 problem details with `errorCode`,
 | `GET /config/snapshot?since=V` | authenticated | `{"type":"delta",...}` or `{"type":"full",...}`, other tenants filtered out unless SERVICE/ADMIN |
 | `GET /actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/prometheus` | public | liveness ignores the database, so a server that still serves reads from memory is not restarted when only Postgres is down |
 
-To watch the push stream the way an embedded client does (it replays everything after `Last-Event-ID`, then stays
-open with a `: ping` every 15 s):
+To watch the push stream the way an embedded client does (it starts with a `: connected` comment, replays everything
+after `Last-Event-ID`, then stays open with a `: ping` every 15 s):
 
 ```bash
 SVC=$(curl -s -X POST localhost:8080/api/v1/auth/token -H 'Content-Type: application/json' \
@@ -196,7 +202,18 @@ curl -N localhost:8080/api/v1/config/stream -H "Authorization: Bearer $SVC" -H '
 ```
 
 `op` is `SET` or `UNSET`; `level` is `CLIENT`, `OFFICE` or `SHIFT` (GLOBAL changes go through the definition
-default). Postman collection: [docs/postman/tenant-config.postman_collection.json](docs/postman/tenant-config.postman_collection.json).
+default). A CLIENT `scopeId` must be the tenant id itself.
+
+| errorCode | HTTP | When |
+|---|---|---|
+| `VALIDATION_FAILED` | 422 | a value, a change set or a definition breaks a rule; `errors[].code` says which: `UNKNOWN_KEY`, `GLOBAL_SCOPE_NOT_ALLOWED`, `CLIENT_SCOPE_MISMATCH`, `CROSS_FIELD_ORDER`, `TYPE_MISMATCH`, `OUT_OF_RANGE`, `NEGATIVE_DURATION`, `WINDOW_EMPTY`, `WINDOW_END_BEFORE_START`, `OVERNIGHT_NOT_ALLOWED`, `OVERNIGHT_FLAG_MISMATCH`, `NOT_IN_ENUM`, `TOO_MANY_ITEMS`, `UNKNOWN_TYPE`, `INVALID_RULES`, `DEFINITION_EXISTS`, `NOT_A_STAGED_CHANGE` |
+| `BAD_REQUEST` | 400 | malformed body, missing field, bad parameter type or out-of-range `limit`; other HTTP errors (405, 415, ...) carry their status name the same way |
+| `UNAUTHORIZED` | 401 | no token or an invalid one |
+| `FORBIDDEN` | 403 | the role may not do this at all |
+| `NOT_FOUND`, `UNKNOWN_SETTING`, `VERSION_NOT_FOUND` | 404 | another tenant (same body as any unknown id), an unknown key, a version that does not exist |
+| `IDEMPOTENCY_CONFLICT`, `STAGED_CHANGE_SUPERSEDED` | 409 | same `Idempotency-Key` with another body; promoting a staged change that newer changes have overtaken |
+| `PUSH_CAPACITY`, `STORAGE_UNAVAILABLE` | 503 | 2,000 streams already open (with `Retry-After: 5`); the database is down |
+| `INTERNAL` | 500 | anything else: "Unexpected error" and the `requestId`, details only in the log | Postman collection: [docs/postman/tenant-config.postman_collection.json](docs/postman/tenant-config.postman_collection.json).
 
 ## Roles and seeded users
 
@@ -265,8 +282,9 @@ other tenants. ADMIN may write to any tenant id. `*` is reserved for definitions
 - Office and shift ids are unique within a tenant. A scope is (tenant, level, id).
 - Shift-to-office membership is not modelled. The caller passes `officeId` and `shiftId`; a cross-field check on a
   SHIFT value resolves its partner at SHIFT, then CLIENT, then GLOBAL, and does not see an OFFICE-level partner.
-- The one cross-field rule is `booking.cutoff < booking.maxAdvance`, checked against the state the change would
-  produce. `lessThan` compares DURATION with DURATION or NUMBER with NUMBER only.
+- The one cross-field rule is `booking.cutoff < booking.maxAdvance`. A change set or a definition change is judged on
+  the state it would produce, at every scope of the tenant whose pair it alters; a place it leaves as it was is not
+  blamed for an older problem. `lessThan` must name a setting of the same type, NUMBER or DURATION.
 - GLOBAL values change only through `PUT /definitions/{key}`. Definitions are never deleted and a key's type never
   changes. A rule change that would make an existing override invalid is rejected with 422; there is no migration.
 - The ring buffer holds 1,000 events; a client further behind takes a full snapshot.
@@ -280,9 +298,12 @@ other tenants. ADMIN may write to any tenant id. `*` is reserved for definitions
   staged value, which also makes promoting the same version twice a 409.
 - An UNSET of a value that is not set still writes a version with no effect on state.
 - No token revocation; human tokens are short-lived instead.
-- `config_client_lag_seconds` counts from the last moment the client knew it was current: a stream heartbeat (every
-  15 s), an applied event, or a heal poll with no lag. An applied event uses the server's commit time, so clock skew
-  can show up there.
+- `config_client_lag_seconds` is the time since the stream or the server last proved alive (a heartbeat every 15 s,
+  an applied event, or a heal poll with no lag), not the age of the data. It stays under 15 s while connected and
+  grows during an outage. An applied event uses the server's commit time, so clock skew can show up there.
+- Two interfaces grew beyond the original plan: `ConfigTransport.openStream` also takes `onResync` (the server's
+  "fetch a snapshot" instruction) and `onAlive` (heartbeats), and `ClientMetrics` adds `eventAge` and `alive` for
+  the lag gauge.
 - A restored database is noticed when its version is below a client's: the heal poll then takes the server's full
   snapshot. A restore followed by enough new writes to pass a client's version would not be noticed; that needs an
   epoch id in every response, which I left out.
@@ -302,14 +323,14 @@ other tenants. ADMIN may write to any tenant id. `*` is reserved for definitions
 | Staged rollout and promote | `StagedRolloutTest` |
 | Rollback to any version with a diff | `RollbackTest`, `RollbackLockTest` |
 | A definition change cannot break `cutoff < maxAdvance` | `DefinitionImpactTest` |
-| Every refused write is logged and counted | `RejectionAccountingTest` |
+| Every write refused by validation or a conflict (422, 409) is logged and counted | `RejectionAccountingTest` |
 | Connection cap answers 503 with `Retry-After` | `PushHubTest`, `PushCapacityResponseTest` |
-| Server down: keep serving, start from disk | `ServerKillIT`, `DiskSnapshotColdStartTest` |
+| Server down: keep serving, start from disk | `ServerKillIT` (it checks lag through a test metric that records when the server last answered), `DiskSnapshotColdStartTest` |
 | Roles and tenant isolation | `SecurityIT` |
 | Duplicate POST | `IdempotencyTest` |
 | Promote cannot overwrite newer values or run twice | `StagedRolloutTest` |
 | Missing fields and bad parameters are named, never echoed | `RequestValidationTest`, `ProblemDetailTest` |
-| Lag metric stays near 0 while connected | `HeartbeatTest`, `MicrometerClientMetricsTest` |
+| Lag metric stays under 15 s while connected | `HeartbeatTest`, `MicrometerClientMetricsTest` |
 | Errors leak nothing | `ProblemDetailTest` |
 
 ## How to run the tests and benchmarks
@@ -359,7 +380,7 @@ with `requestId`, `tenantId` and `actor`; no request bodies and no personal data
 
 | Question | Metric | Healthy |
 |---|---|---|
-| Is a service behind? (lag) | `config_client_lag_versions`, `config_client_lag_seconds` | 0 versions; seconds stays near 0 and climbs only while the server is unreachable |
+| Is a service behind? (lag) | `config_client_lag_versions`, `config_client_lag_seconds` | 0 versions; seconds stays under 15 s (the heartbeat) and climbs only while the server is unreachable; it is time since the server last proved alive, not data age |
 | Is the service still getting pushes? (retries) | `config_client_reconnects_total`, `config_client_gap_resync_total` | flat; a rising reconnect count means the stream keeps dropping |
 | Are duplicates or reordered pushes arriving? | `config_client_stale_events_total` | near 0 |
 | Are operators' changes being refused? (rejections) | `config_changes_total{result="rejected"}`, `config_validation_errors_total{code}` | spikes match a human mistake, not a trend |
