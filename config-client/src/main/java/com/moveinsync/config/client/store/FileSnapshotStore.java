@@ -30,7 +30,9 @@ public class FileSnapshotStore implements SnapshotStore {
             return Optional.empty();
         }
         try {
-            return Optional.of(read());
+            Snapshot snapshot = read();
+            log.log(Level.INFO, "started from disk snapshot version=" + snapshot.version());
+            return Optional.of(snapshot);
         } catch (IOException | RuntimeException e) {
             // a corrupt copy is no worse than no copy: start empty and let the server fill us in
             log.log(Level.WARNING, "ignoring unreadable snapshot file " + file + ": " + e.getMessage());

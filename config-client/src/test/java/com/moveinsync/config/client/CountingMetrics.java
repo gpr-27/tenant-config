@@ -8,6 +8,7 @@ final class CountingMetrics implements ClientMetrics {
 
     long version;
     long lag;
+    int alives;
     int staleEvents;
     int gapResyncs;
     int reconnects;
@@ -24,6 +25,11 @@ final class CountingMetrics implements ClientMetrics {
 
     @Override
     public void eventAge(Duration age) {
+    }
+
+    @Override
+    public void alive() {
+        alives++;
     }
 
     @Override

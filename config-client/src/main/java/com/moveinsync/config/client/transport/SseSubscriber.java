@@ -21,6 +21,7 @@ public final class SseSubscriber implements Flow.Subscriber<String> {
 
     private final Consumer<ChangeEvent> onEvent;
     private final Runnable onResync;
+    private final Runnable onAlive;
     private final Runnable onClose;
     private final long readTimeoutNanos;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -32,9 +33,11 @@ public final class SseSubscriber implements Flow.Subscriber<String> {
     private volatile Flow.Subscription subscription;
     private volatile long lastLineAt = System.nanoTime();
 
-    public SseSubscriber(Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onClose, Duration readTimeout) {
+    public SseSubscriber(Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onAlive, Runnable onClose,
+                         Duration readTimeout) {
         this.onEvent = onEvent;
         this.onResync = onResync;
+        this.onAlive = onAlive;
         this.onClose = onClose;
         this.readTimeoutNanos = readTimeout.toNanos();
     }
@@ -65,8 +68,10 @@ public final class SseSubscriber implements Flow.Subscriber<String> {
                 data.append('\n');
             }
             data.append(value(line, 5));
+        } else if (line.startsWith(":")) {
+            onAlive.run();
         }
-        // comment lines (": ping") and "event:" carry nothing the client needs
+        // "event:" carries nothing the client needs
     }
 
     @Override
@@ -97,6 +102,7 @@ public final class SseSubscriber implements Flow.Subscriber<String> {
     private void dispatch(String frameId, String payload) {
         ChangeEvent event = null;
         boolean resync;
+        boolean readable = true;
         try {
             JsonNode json = SnapshotCodec.mapper().readTree(payload);
             resync = frameId == null && "resync".equals(json.path("type").asText());
@@ -107,6 +113,11 @@ public final class SseSubscriber implements Flow.Subscriber<String> {
             // we cannot tell what this frame changed, so fetch the truth instead of guessing
             log.log(Level.WARNING, "unreadable push frame id=" + frameId + ": " + e.getMessage());
             resync = true;
+            readable = false;
+        }
+        // before the event, so the event age the metrics take from it is what they show until the next heartbeat
+        if (readable) {
+            onAlive.run();
         }
         if (resync) {
             onResync.run();

@@ -15,12 +15,14 @@ class FullSnapshotReplacesStateTest {
 
     private final FakeTransport transport = new FakeTransport();
     private final InMemoryStore store = new InMemoryStore();
+    private final ManualScheduler scheduler = new ManualScheduler();
     private ConfigClient client;
 
     @BeforeEach
     void startAt43WithA30MinuteCutoff() {
         transport.answers.add(new SnapshotResponse.Full(snapshotAt(42).apply(cutoff(43, "PT30M"))));
-        client = new ConfigClient(Fixtures.options(), transport, store, new CountingMetrics(), new ManualScheduler());
+        client = new ConfigClient(Fixtures.options(), transport, store, new CountingMetrics(), scheduler);
+        transport.serverVersion = 43;
         client.start();
         assertThat(cutoffIn(client)).isEqualTo(Duration.ofMinutes(30));
     }
@@ -40,6 +42,7 @@ class FullSnapshotReplacesStateTest {
     @Test
     void fullWithLowerVersionReplacesTheSnapshot() {
         // the server was restored from an older backup: it is the truth, and later pushes continue from its version
+        transport.serverVersion = 41;
         transport.answers.add(new SnapshotResponse.Full(snapshotAt(40).apply(cutoff(41, "PT45M"))));
 
         transport.askForResync();
@@ -49,5 +52,29 @@ class FullSnapshotReplacesStateTest {
         transport.push(cutoff(42, "PT15M"));
         assertThat(client.version()).isEqualTo(42);
         assertThat(cutoffIn(client)).isEqualTo(Duration.ofMinutes(15));
+    }
+
+    @Test
+    void anOlderFullSnapshotFromAServerThatIsAheadIsIgnored() {
+        // fetched before a push moved us on: taking it would undo that push
+        transport.serverVersion = 50;
+        transport.answers.add(new SnapshotResponse.Full(snapshotAt(42)));
+
+        transport.askForResync();
+
+        assertThat(client.version()).isEqualTo(43);
+        assertThat(cutoffIn(client)).isEqualTo(Duration.ofMinutes(30));
+        assertThat(store.saved.version()).isEqualTo(43);
+    }
+
+    @Test
+    void healPollNoticesAServerThatWentBackAndFollowsIt() {
+        transport.serverVersion = 41;
+        transport.answers.add(new SnapshotResponse.Full(snapshotAt(40).apply(cutoff(41, "PT45M"))));
+
+        scheduler.runPeriodic();
+
+        assertThat(client.version()).isEqualTo(41);
+        assertThat(cutoffIn(client)).isEqualTo(Duration.ofMinutes(45));
     }
 }

@@ -11,6 +11,10 @@ public final class Backoff {
     private final Random random;
     private int attempt;
 
+    public Backoff(Duration base, Duration cap) {
+        this(base, cap, new Random());
+    }
+
     public Backoff(Duration base, Duration cap, Random random) {
         this.baseMillis = base.toMillis();
         this.capMillis = cap.toMillis();

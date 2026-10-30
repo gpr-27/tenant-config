@@ -13,6 +13,9 @@ public interface ClientMetrics {
     // now minus the change's createdAt when a pushed change is applied
     void eventAge(Duration age);
 
+    // the push stream sent a heartbeat or a frame: it is open, so any change would have reached us by now
+    void alive();
+
     void staleEvent();
 
     void gapResync();

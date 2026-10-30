@@ -72,8 +72,9 @@ public final class HttpConfigTransport implements ConfigTransport {
     }
 
     @Override
-    public void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onClose) {
-        SseSubscriber subscriber = new SseSubscriber(onEvent, onResync, onClose, readTimeout);
+    public void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onAlive,
+                           Runnable onClose) {
+        SseSubscriber subscriber = new SseSubscriber(onEvent, onResync, onAlive, onClose, readTimeout);
         stream = subscriber;
         HttpRequest request;
         try {

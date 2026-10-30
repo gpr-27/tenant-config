@@ -16,9 +16,10 @@ class SseSubscriberTest {
 
     private final List<ChangeEvent> events = new ArrayList<>();
     private int resyncs;
+    private int alives;
     private int closes;
-    private final SseSubscriber subscriber = new SseSubscriber(events::add, () -> resyncs++, () -> closes++,
-            Duration.ofMinutes(5));
+    private final SseSubscriber subscriber = new SseSubscriber(events::add, () -> resyncs++, () -> alives++,
+            () -> closes++, Duration.ofMinutes(5));
 
     @Test
     void changeFrameIsDispatchedAtTheBlankLine() {
@@ -33,11 +34,29 @@ class SseSubscriberTest {
     }
 
     @Test
-    void heartbeatCommentsAreIgnored() {
+    void pingCommentSignalsAliveAndIsNotAnEvent() {
         feed(": ping", "", ": ping", "");
 
+        assertThat(alives).isEqualTo(2);
         assertThat(events).isEmpty();
         assertThat(resyncs).isZero();
+    }
+
+    @Test
+    void connectedCommentSignalsAlive() {
+        feed(": connected", "");
+
+        assertThat(alives).isEqualTo(1);
+        assertThat(events).isEmpty();
+    }
+
+    @Test
+    void everyReadableFrameSignalsAliveButAnUnreadableOneDoesNot() {
+        feed("id: 144", "data: " + ChangeEventCodec.toJson(Fixtures.cutoff(144, "PT30M")), "");
+        feed("data: {\"type\":\"resync\"}", "");
+        feed("id: 145", "data: {not json", "");
+
+        assertThat(alives).isEqualTo(2);
     }
 
     @Test

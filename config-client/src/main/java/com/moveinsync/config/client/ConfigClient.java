@@ -17,8 +17,6 @@ import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Random;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -41,7 +39,7 @@ public final class ConfigClient implements AutoCloseable {
     private final ScheduledExecutorService exec;
     private final boolean ownsExec;
     private final Backoff backoff;
-    private final List<SnapshotListener> listeners = new CopyOnWriteArrayList<>();
+    private final Listeners listeners = new Listeners();
 
     private volatile Snapshot current = Snapshot.empty();
     private volatile boolean closed;
@@ -51,13 +49,13 @@ public final class ConfigClient implements AutoCloseable {
         this(options, new HttpConfigTransport(options), new FileSnapshotStore(options.snapshotFile()),
                 new NoopClientMetrics(),
                 Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("config-client").daemon().factory()),
-                newBackoff(options), true);
+                new Backoff(options.backoffBase(), options.backoffCap()), true);
     }
 
     // the seam for tests and for apps that bring their own metrics or scheduler; the scheduler stays theirs to shut down
     public ConfigClient(ConfigClientOptions options, ConfigTransport transport, SnapshotStore store,
                         ClientMetrics metrics, ScheduledExecutorService exec) {
-        this(options, transport, store, metrics, exec, newBackoff(options), false);
+        this(options, transport, store, metrics, exec, new Backoff(options.backoffBase(), options.backoffCap()), false);
     }
 
     // tests pass a Backoff with a fixed Random so reconnect delays are predictable
@@ -73,8 +71,8 @@ public final class ConfigClient implements AutoCloseable {
     }
 
     public void start() {
-        store.load().ifPresent(this::advance);
-        resync();
+        store.load().ifPresent(disk -> advance(disk, false));
+        resync(false);
         openStream();
         long poll = options.healPollInterval().toMillis();
         healPollTask = exec.scheduleAtFixedRate(this::healPoll, poll, poll, TimeUnit.MILLISECONDS);
@@ -122,7 +120,8 @@ public final class ConfigClient implements AutoCloseable {
 
     private void openStream() {
         if (!closed) {
-            transport.openStream(current.version(), this::onEvent, this::onResyncRequested, this::onStreamClosed);
+            transport.openStream(current.version(), this::onEvent, this::onResyncRequested, metrics::alive,
+                    this::onStreamClosed);
         }
     }
 
@@ -134,7 +133,7 @@ public final class ConfigClient implements AutoCloseable {
             case GAP -> {
                 metrics.gapResync();
                 log.log(Level.WARNING, "push " + event.version() + " does not follow local " + current.version() + ", resyncing");
-                resync();
+                resync(false);
             }
         }
     }
@@ -142,7 +141,7 @@ public final class ConfigClient implements AutoCloseable {
     private void onResyncRequested() {
         backoff.reset();
         log.log(Level.WARNING, "server asked for a resync at local " + current.version());
-        resync();
+        resync(serverIsBehind());
     }
 
     private void onStreamClosed() {
@@ -160,9 +159,9 @@ public final class ConfigClient implements AutoCloseable {
             long server = transport.version();
             long local = current.version();
             metrics.lag(server - local);
-            if (server > local) {
+            if (server != local) {
                 log.log(Level.WARNING, "heal poll: server at " + server + ", local at " + local + ", resyncing");
-                resync();
+                resync(server < local);
             }
         } catch (RuntimeException e) {
             // an exception would cancel the fixed-rate schedule for good; the next tick simply asks again
@@ -170,12 +169,21 @@ public final class ConfigClient implements AutoCloseable {
         }
     }
 
-    private void resync() {
+    // the only case where an older full snapshot is welcome: the server itself went back (restored from a backup)
+    private boolean serverIsBehind() {
+        try {
+            return transport.version() < current.version();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void resync(boolean serverWentBack) {
         try {
             for (int round = 0; round < MAX_RESYNC_ROUNDS; round++) {
                 boolean done = switch (transport.snapshotSince(current.version())) {
                     case SnapshotResponse.Full full -> {
-                        advance(full.snapshot());
+                        advance(full.snapshot(), serverWentBack);
                         yield true;
                     }
                     case SnapshotResponse.Delta delta -> advance(delta.changes()) != Advance.GAP;
@@ -212,8 +220,13 @@ public final class ConfigClient implements AutoCloseable {
         return outcome;
     }
 
-    private synchronized void advance(Snapshot full) {
+    // the fetch ran outside the lock, so a push may have moved us past this snapshot meanwhile; going back to it
+    // would undo that push. Only a server that really went back may take us back.
+    private synchronized void advance(Snapshot full, boolean serverWentBack) {
         if (full.version() < current.version()) {
+            if (!serverWentBack) {
+                return;
+            }
             log.log(Level.WARNING, "server snapshot " + full.version() + " is older than local " + current.version()
                     + ", accepting it: the server is the truth (restored from a backup?)");
         }
@@ -229,18 +242,7 @@ public final class ConfigClient implements AutoCloseable {
             // the disk copy only matters for a cold start; a failed write must not hold back the update itself
             log.log(Level.WARNING, "could not save snapshot " + next.version() + " to disk: " + e.getMessage());
         }
-        for (SnapshotListener listener : listeners) {
-            try {
-                listener.onSnapshot(next);
-            } catch (RuntimeException e) {
-                // one broken listener must not stop the others or the update itself
-                log.log(Level.WARNING, "snapshot listener failed on version " + next.version() + ": " + e);
-            }
-        }
+        listeners.tell(next);
         metrics.version(next.version());
-    }
-
-    private static Backoff newBackoff(ConfigClientOptions options) {
-        return new Backoff(options.backoffBase(), options.backoffCap(), new Random());
     }
 }

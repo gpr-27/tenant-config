@@ -42,6 +42,11 @@ final class CountingClientMetrics implements ClientMetrics {
     }
 
     @Override
+    public void alive() {
+        serverAnsweredAt = System.nanoTime();
+    }
+
+    @Override
     public void staleEvent() {
     }
 

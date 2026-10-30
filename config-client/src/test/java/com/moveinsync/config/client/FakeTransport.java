@@ -24,6 +24,7 @@ final class FakeTransport implements ConfigTransport {
 
     private Consumer<ChangeEvent> onEvent;
     private Runnable onResync;
+    private Runnable onAlive;
     private Runnable onClose;
 
     @Override
@@ -41,7 +42,8 @@ final class FakeTransport implements ConfigTransport {
     }
 
     @Override
-    public void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onClose) {
+    public void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onAlive,
+                           Runnable onClose) {
         calls++;
         streamOpenedAt.add(lastEventId);
         if (down) {
@@ -50,6 +52,7 @@ final class FakeTransport implements ConfigTransport {
         }
         this.onEvent = onEvent;
         this.onResync = onResync;
+        this.onAlive = onAlive;
         this.onClose = onClose;
     }
 
@@ -63,6 +66,10 @@ final class FakeTransport implements ConfigTransport {
 
     void askForResync() {
         onResync.run();
+    }
+
+    void heartbeat() {
+        onAlive.run();
     }
 
     void dropStream() {

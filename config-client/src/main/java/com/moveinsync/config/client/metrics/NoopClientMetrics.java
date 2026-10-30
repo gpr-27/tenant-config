@@ -17,6 +17,10 @@ public final class NoopClientMetrics implements ClientMetrics {
     }
 
     @Override
+    public void alive() {
+    }
+
+    @Override
     public void staleEvent() {
     }
 

@@ -66,18 +66,25 @@ class BookingControllerTest {
 
         @Bean(destroyMethod = "close")
         ConfigClient configClient(ScheduledExecutorService exec) {
-            SettingDefinition cutoff = new SettingDefinition("booking.cutoff", SettingTypes.DURATION, Rules.NONE,
-                    Duration.ofMinutes(30), "how long before departure booking closes");
-            Snapshot snapshot = Snapshot.of(7, Map.of("booking.cutoff", cutoff),
-                    Map.of("acme", Map.of(ScopeKey.office("blr"), Map.of("booking.cutoff", Duration.ofMinutes(60)))));
-
-            ConfigClientOptions options = ConfigClientOptions.defaults(URI.create("http://unused"), () -> "token",
-                    Path.of("unused"));
-            ConfigClient client = new ConfigClient(options, new FixedSnapshotTransport(snapshot),
-                    new NoopSnapshotStore(), new NoopClientMetrics(), exec);
+            ConfigClient client = clientServing(officeCutoffAt7(), exec);
             client.start();
             return client;
         }
+    }
+
+    // version 7: acme's blr office closes booking an hour before departure
+    static Snapshot officeCutoffAt7() {
+        SettingDefinition cutoff = new SettingDefinition("booking.cutoff", SettingTypes.DURATION, Rules.NONE,
+                Duration.ofMinutes(30), "how long before departure booking closes");
+        return Snapshot.of(7, Map.of("booking.cutoff", cutoff),
+                Map.of("acme", Map.of(ScopeKey.office("blr"), Map.of("booking.cutoff", Duration.ofMinutes(60)))));
+    }
+
+    static ConfigClient clientServing(Snapshot snapshot, ScheduledExecutorService exec) {
+        ConfigClientOptions options = ConfigClientOptions.defaults(URI.create("http://unused"), () -> "token",
+                Path.of("unused"));
+        return new ConfigClient(options, new FixedSnapshotTransport(snapshot), new NoopSnapshotStore(),
+                new NoopClientMetrics(), exec);
     }
 
     // a server that always answers with the same full snapshot and never pushes
@@ -94,7 +101,8 @@ class BookingControllerTest {
         }
 
         @Override
-        public void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onClose) {
+        public void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onAlive,
+                               Runnable onClose) {
         }
 
         @Override

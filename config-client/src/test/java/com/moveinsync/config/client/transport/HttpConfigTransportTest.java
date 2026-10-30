@@ -102,7 +102,7 @@ class HttpConfigTransportTest {
         AtomicInteger resyncs = new AtomicInteger();
         CountDownLatch closed = new CountDownLatch(1);
 
-        transport.openStream(43, events::add, resyncs::incrementAndGet, closed::countDown);
+        transport.openStream(43, events::add, resyncs::incrementAndGet, () -> { }, closed::countDown);
 
         assertThat(closed.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(lastEventIds).containsExactly("43");
