@@ -169,7 +169,8 @@ public final class ConfigClient implements AutoCloseable {
         }
     }
 
-    // the only case where an older full snapshot is welcome: the server itself went back (restored from a backup)
+    // the only case where an older full snapshot is welcome: the server itself went back (restored from a backup).
+    // If the server cannot be asked, that is no proof, so the answer is no.
     private boolean serverIsBehind() {
         try {
             return transport.version() < current.version();

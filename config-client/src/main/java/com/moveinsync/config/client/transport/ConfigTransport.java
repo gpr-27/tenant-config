@@ -11,8 +11,8 @@ public interface ConfigTransport extends AutoCloseable {
 
     SnapshotResponse snapshotSince(long version);
 
-    // returns at once; onAlive runs for every heartbeat or frame the server sends; onClose runs exactly once when
-    // the stream ends, fails or cannot be opened
+    // returns at once; onAlive runs for every heartbeat or readable frame the server sends; onClose runs exactly once
+    // when the stream ends, fails or cannot be opened
     void openStream(long lastEventId, Consumer<ChangeEvent> onEvent, Runnable onResync, Runnable onAlive,
                     Runnable onClose);
 

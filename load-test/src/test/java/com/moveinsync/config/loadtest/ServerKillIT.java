@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 // the real server image is killed under 5 clients: reads keep answering from memory, and the clients
-// catch up on their own once a new container is back on the same address
+// catch up on their own once a new container is back on the same port
 class ServerKillIT {
 
     private static final int CLIENTS = 5;

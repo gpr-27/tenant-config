@@ -47,7 +47,8 @@ public final class Diff {
         return operations;
     }
 
-    // BigDecimal.equals also compares scale: 1E+1 (a client's 10.0) and 10 (read back from jsonb) are one value
+    // NumberType.parse already gives one form per number; compareTo still guards values built any other way,
+    // because BigDecimal.equals also compares scale and would report 10 and 10.0 as a change
     public static boolean same(Object then, Object now) {
         if (then instanceof BigDecimal a && now instanceof BigDecimal b) {
             return a.compareTo(b) == 0;
