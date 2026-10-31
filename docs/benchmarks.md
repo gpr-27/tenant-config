@@ -1,6 +1,6 @@
 # Benchmarks
 
-All numbers below are from one machine on one day; the commands reproduce them.
+All numbers below come from one machine on one day. The command in each section reproduces them.
 
 ## Machine
 
@@ -12,7 +12,7 @@ All numbers below are from one machine on one day; the commands reproduce them.
 | JDK | OpenJDK 21.0.13 (Homebrew) |
 | Docker | Colima, 4 CPU / 6 GB VM |
 | Date | 2026-10-30 |
-| Commit | reads: working tree before the first commit (the read path has not changed since); propagation, writes and the reconnect storm: `dbb52ae` |
+| Commit | reads: the working tree before the first commit (the read path has not changed since then); propagation, writes and the reconnect storm: `dbb52ae` |
 
 Before any run:
 
@@ -23,9 +23,11 @@ mvn -q -B package -DskipTests
 
 ## 1. Read latency (JMH)
 
-Snapshot of 50 tenants x 40 offices x 25 keys (about 50,000 overrides). `SampleTime` mode, nanoseconds,
-5 warm-up and 5 measurement iterations, 1 fork. Three cases: the value is set at SHIFT, at OFFICE, or only the
-GLOBAL default applies (the full walk).
+JMH (Java Microbenchmark Harness: the standard tool for timing small pieces of Java code) runs this benchmark. The
+snapshot holds 50 tenants x 40 offices x 25 keys (about 50,000 overrides). The run uses `SampleTime` mode (it records
+the time of individual calls) in nanoseconds, with 5 warm-up iterations, 5 measurement iterations and 1 fork. There
+are three cases: the value is set at SHIFT, the value is set at OFFICE, or only the GLOBAL default applies. The last
+case is the full walk up the hierarchy.
 
 ```bash
 # read benchmark (SampleTime, ns) and a throughput pass (ops/s)
@@ -34,13 +36,16 @@ java -jar load-test/target/benchmarks.jar
 java -jar load-test/target/benchmarks.jar -bm thrpt -tu s
 ```
 
+In the tables on this page, p50 is the median. p99 is the value that 99% of calls stay under, and the same idea
+applies to p99.9.
+
 | Case | p50 ns | p99 ns | p99.9 ns | ops/s |
 |---|---|---|---|---|
 | SHIFT hit | 41 | 83 | 167 | 19.9 M |
 | OFFICE hit | 42 | 167 | 375 | 15.7 M |
 | GLOBAL fallback | 83 | 167 | 375 | 17.4 M |
 
-Raw output (sample mode, then throughput mode):
+Raw output (sample mode first, then throughput mode):
 
 ```
 Benchmark Mode Cnt Score Error Units
@@ -68,8 +73,9 @@ ReadLatencyBenchmark.shiftHit thrpt 5 19869144.198 ± 4492318.761 ops/s
 
 ## 2. Propagation to 200 clients
 
-200 `ConfigClient` instances against the compose server, 20 publishes. Latency per publish is measured from the
-moment `POST /changes` returns to the moment each client's listener fires (`System.nanoTime`).
+200 `ConfigClient` instances connect to the server started by Docker Compose, and the benchmark makes 20 publishes.
+For each publish, latency is the time from the moment `POST /changes` returns to the moment each client's listener
+fires. The timer is `System.nanoTime`.
 
 ```bash
 docker compose up --build -d
@@ -80,9 +86,10 @@ BASE=http://localhost:8080 java -cp load-test/target/benchmarks.jar com.moveinsy
 |---|---|---|---|---|
 | 200 | 20 | 0.99 | 6.9 | 7.9 |
 
-5 of the 20 per-publish medians are negative: the listener fired before the operator's POST returned, because the
-server publishes inside the same call right after commit. An earlier run on a busier machine (a Docker build in
-parallel) gave p50 0.42, p99 26 and max 32 ms, all of the tail on the first, cold publish.
+5 of the 20 per-publish medians are negative. In those cases the listener fired before the operator's POST returned.
+This happens because the server publishes the change inside the same call, right after the commit. An earlier run on
+a busier machine (a Docker build was running in parallel) gave p50 0.42, p99 26 and max 32 ms. All of that tail came
+from the first publish, while the system was still cold.
 
 Raw output:
 
@@ -114,23 +121,25 @@ Raw output:
 
 ## 3. Reconnect storm
 
-500 clients connected, server restarted. Measured: time until every client is at the current version, and the
-number of `config_change` selects during the catch-up (target 0: the ring answers).
+500 clients are connected, then the server restarts. The test measures two things. The first is the time until every
+client is at the current version. The second is the number of `config_change` selects during the catch-up. The target
+for selects is 0, because the ring (the in-memory buffer of recent change-log rows) should answer every client.
 
 ```bash
 mvn -B -pl load-test -am verify -Pit -Dit.test=ReconnectStormTest -Dtest=none \
   -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false
 ```
 
-| Clients | Time to all current | `config_change` selects |
+| Clients | Time until all are current | `config_change` selects |
 |---|---|---|
-| 500 | 1.9 s worst of 3 runs (1,734 / 984 / 1,898 ms); 1.7 to 1.9 s again in later full builds | 0 Hibernate statements, 0 queries |
+| 500 | 1.9 s in the worst of 3 runs (1,734 / 984 / 1,898 ms); 1.7 to 1.9 s again in later full builds | 0 Hibernate statements, 0 queries |
 
-The test stops the embedded Tomcat, which drops all 500 SSE streams, and commits two change sets while they are
-down. It then empties the server's memory and rebuilds it from the database the way a fresh process does
-(values, latest version and the last 1,000 log rows), restarts Tomcat, and measures until the last client reports
-the current version. Hibernate statistics are read after the rebuild and again after the catch-up; every client was
-served from the rebuilt in-memory ring.
+The test stops the embedded Tomcat. This drops all 500 SSE streams (Server-Sent Events: one long HTTP response that
+the server keeps writing to). While the streams are down, the test commits two change sets. It then clears the
+server's memory and rebuilds it from the database, the same way a fresh process does: values, latest version and the
+last 1,000 log rows. Then it restarts Tomcat and measures until the last client reports the current version. The test
+reads Hibernate statistics (Hibernate's own count of the SQL statements and queries it ran) after the rebuild and again
+after the catch-up. Every client was served from the rebuilt in-memory ring.
 
 ```
 reconnect storm: 500 clients current 1734 ms after restart; 0 SQL statements, 0 queries
@@ -140,27 +149,29 @@ reconnect storm: 500 clients current 1898 ms after restart; 0 SQL statements, 0 
 
 ## 4. Server kill
 
-5 clients; publish version v; stop the server container; reads keep returning v for 10 s; start it; publish v+1;
-all clients reach v+1 within 5 s.
+5 clients connect, and version v is published. Then the server container stops. For 10 s, reads keep returning v. The
+container starts again, and v+1 is published. All clients reach v+1 within 5 s.
 
 ```bash
 mvn -B verify -Pit
 ```
 
-| Reads during outage | Time to v+1 after restart |
+| Reads during the outage | Time to v+1 after restart |
 |---|---|
-| about 200 (5 clients, sampled every 250 ms for 10 s), all returned v | under 5 s (the test's bound); the whole test, including the 10 s outage and the container restart, took 22 s |
+| about 200 (5 clients, sampled every 250 ms for 10 s), all returned v | under 5 s (the test's limit); the whole test, including the 10 s outage and the container restart, took 22 s |
 
-`ServerKillIT` runs the real server image from `config-server/Dockerfile` in Testcontainers next to a Postgres
-container, stops the server container with the clients connected, and starts a new one on the same host port.
-During the outage every client also reports a growing time since the server last answered and a rising reconnect
-count. Tokens issued before the kill still work after it, because the restarted container has the same JWT secret.
+`ServerKillIT` runs the real server image, built from `config-server/Dockerfile`, in Testcontainers (a library that
+starts Docker containers from a test) next to a Postgres container. It stops the server container while the clients
+are connected, then starts a new one on the same host port. During the outage, every client also reports a growing
+time since the server last answered and a rising reconnect count. Tokens issued before the kill still work after it,
+because the restarted container has the same JWT secret (the key that signs login tokens).
 
 ## 5. Write throughput
 
-`hey` for 30 s with 20 concurrent workers against `POST /api/v1/tenants/acme/changes`, logged in as `acme-ops`.
-Every request is one SET at OFFICE `blr-bench`. The script sends no `Idempotency-Key`, because `hey` repeats the
-same headers on every request and a shared key would turn the run into one write plus replays.
+`hey` (a small HTTP load generator) runs for 30 s with 20 concurrent workers against
+`POST /api/v1/tenants/acme/changes`, logged in as `acme-ops`. Every request is one SET at OFFICE `blr-bench`. The
+script sends no `Idempotency-Key`. `hey` repeats the same headers on every request, so a shared key would turn the run
+into one write plus replays.
 
 ```bash
 docker compose up --build -d
@@ -172,9 +183,10 @@ load-test/scripts/bench-writes.sh
 |---|---|---|---|
 | 1,084 | 13.5 | 71.5 | 0 (32,537 requests, all 201) |
 
-Every request is a real commit (log row + override upsert + push to the one connected demo client), taken under
-the single write lock, so this is the serialised write path at full tilt: under 1 ms of lock time per change set.
-Operators make a few changes a minute. An earlier run on a busier machine gave 346 req/s, p50 38 ms, p99 359 ms.
+Every request is a real commit: a log row, an override upsert (insert or update) and a push to the one connected demo
+client. Each commit runs under the single write lock, so this run measures the serialised (one at a time) write path
+at full speed. Lock time is under 1 ms per change set. Operators make a few changes a minute. An earlier run on a
+busier machine gave 346 req/s, p50 38 ms and p99 359 ms.
 
 Raw output:
 
@@ -199,8 +211,9 @@ Status code distribution:
 
 ## What these numbers do not show
 
-- Network: server, clients and Postgres share one host and talk over loopback or the Colima VM bridge. A real
-  network adds latency and loss to propagation and writes.
-- Scale-out: one server instance; no load balancer or proxy between clients and the SSE stream.
-- Tuning: default JVM flags and GC, default HikariCP pool, default Postgres settings.
-- Write mix: the write benchmark repeats one small change set; larger change sets cost more to validate and copy.
+- Network: the server, the clients and Postgres share one host. They talk over loopback or the Colima VM bridge. A
+  real network adds latency and loss to propagation and writes.
+- Scale-out: there is one server instance, with no load balancer or proxy between the clients and the SSE stream.
+- Tuning: default JVM flags and GC, the default HikariCP pool (the database connection pool) and default Postgres
+  settings.
+- Write mix: the write benchmark repeats one small change set. Larger change sets cost more to check and copy.
